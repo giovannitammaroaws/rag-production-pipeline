@@ -22,11 +22,12 @@ graph_attr = {
     "bgcolor": "white",
     "pad": "0.8",
     "splines": "ortho",
+    "rankdir": "LR",
 }
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v6",
+    filename="images/architecture_v7",
     outformat="png",
     graph_attr=graph_attr,
     show=False,

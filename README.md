@@ -8,7 +8,7 @@ Production-grade Retrieval-Augmented Generation pipeline on AWS. CDC-based docum
 
 Two independent flows share the same Aurora pgvector database via Bedrock Knowledge Bases.
 
-![Architecture](images/architecture_v6.png)
+![Architecture](images/architecture_v7.png)
 
 ```
 ONE API GATEWAY — two routes:
