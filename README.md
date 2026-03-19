@@ -1,1 +1,353 @@
-# rag-production-pipeline
+# RAG Production Pipeline
+
+Production-grade Retrieval-Augmented Generation pipeline on AWS. Handles document ingestion via CDC, chunk-level embedding with model versioning, batched vector indexing, metadata-aware retrieval, and full observability - deployed with Terraform and automated via GitHub Actions CI/CD.
+
+---
+
+## Architecture
+
+```
+                          ┌─────────────────────────────────────────────┐
+                          │              INGESTION LAYER                │
+                          │                                             │
+  User/App ──────────────▶│  S3 (raw docs)                             │
+  (presigned URL upload)  │       │                                     │
+                          │       ▼                                     │
+                          │  S3 Event Notification                      │
+                          │       │                                     │
+                          │       ▼                                     │
+                          │  SQS Queue (ingestion)                      │
+                          │       │                                     │
+                          └───────┼─────────────────────────────────────┘
+                                  │
+                          ┌───────┼─────────────────────────────────────┐
+                          │       ▼      PROCESSING LAYER               │
+                          │  Step Functions (orchestration)             │
+                          │       │                                     │
+                          │  ┌────▼────┐   ┌──────────┐   ┌─────────┐  │
+                          │  │Chunking │──▶│Embedding │──▶│  Index  │  │
+                          │  │(Lambda) │   │ (Lambda) │   │(Lambda) │  │
+                          │  └─────────┘   └────┬─────┘   └────┬────┘  │
+                          │                     │              │        │
+                          │               AWS Bedrock     pgvector      │
+                          │            (Titan Embed v2)  (Aurora PG)    │
+                          └─────────────────────────────────────────────┘
+                                  │
+                          ┌───────┼─────────────────────────────────────┐
+                          │       ▼      RETRIEVAL LAYER                │
+                          │  API Gateway + Cognito Authorizer           │
+                          │       │                                     │
+                          │  FastAPI (Lambda + Mangum)                  │
+                          │       │                                     │
+                          │  pgvector HNSW search + metadata filters    │
+                          │       │                                     │
+                          │  AWS Bedrock (Claude 3) - LLM response      │
+                          └─────────────────────────────────────────────┘
+                                  │
+                          ┌───────┼─────────────────────────────────────┐
+                          │       ▼      FRONTEND                       │
+                          │  React (S3 + CloudFront)                    │
+                          │  - document upload via presigned URL        │
+                          │  - chat interface                           │
+                          │  - ingestion job status dashboard           │
+                          └─────────────────────────────────────────────┘
+```
+
+---
+
+## Full AWS Stack - What We Use and Why
+
+### Storage & Ingestion
+
+**Amazon S3**
+Stores raw documents (PDF, DOCX, TXT) uploaded by users. We use S3 because it's infinitely scalable, cheap ($0.023/GB), and natively integrates with event notifications - when a file lands in S3, the pipeline starts automatically without any polling logic.
+
+**S3 Event Notifications → SQS**
+Instead of polling S3 for new documents (wasteful and slow), we use event notifications: S3 pushes a message to SQS the moment a file is uploaded or modified. This is our CDC (Change Data Capture) mechanism - only changed documents trigger re-processing.
+
+**Amazon SQS**
+Acts as the buffer between the S3 trigger and the processing pipeline. If the pipeline is busy or a Lambda fails, messages wait in the queue and are retried automatically. SQS also provides the dead-letter queue (DLQ) where failed messages land after max retries - so nothing is silently lost.
+
+---
+
+### Processing
+
+**AWS Step Functions**
+Orchestrates the multi-step pipeline (chunking → embedding → indexing) as a state machine with explicit states: PENDING, RUNNING, COMPLETED, FAILED. We use Step Functions because it gives us a visual execution graph, built-in retry with exponential backoff, and 90 days of execution history - all without writing orchestration code from scratch.
+
+**AWS Lambda**
+Runs each pipeline step (chunking, embedding, indexing, retrieval) as isolated, stateless functions. We use Lambda because it scales automatically from 0 to 1000 concurrent executions, costs nothing when idle, and each function has its own IAM role with least-privilege permissions.
+
+**AWS Bedrock - Titan Embeddings v2**
+Converts text chunks into vector embeddings (numerical representations of meaning). We use Bedrock because it's fully managed - no GPU infrastructure to provision or maintain - and Titan Embeddings v2 produces 1536-dimensional vectors with strong semantic quality. Requests are batched (up to 500 items per call) to reduce cost and latency by ~100x vs per-document calls.
+
+**AWS Bedrock - Claude 3**
+Generates the final natural language response given the retrieved context. We use Claude 3 on Bedrock (not OpenAI) to keep everything AWS-native, avoid external API dependencies, and benefit from IAM-based auth instead of managing API keys.
+
+---
+
+### Vector Store
+
+**pgvector on Aurora PostgreSQL Serverless v2**
+Stores document chunks alongside their vector embeddings and metadata. We chose pgvector over dedicated vector databases (Qdrant, Pinecone, Weaviate) because:
+- It runs on standard PostgreSQL - no new infrastructure to learn or operate
+- Aurora Serverless v2 auto-pauses when idle → **costs ~$0 when not in use** (critical for a portfolio project)
+- Supports HNSW indexing for fast approximate nearest-neighbor search at 1M+ vectors
+- Metadata filters use standard SQL WHERE clauses - no proprietary query language
+- Upsert via `INSERT ... ON CONFLICT DO UPDATE` prevents duplicates and HNSW graph fragmentation
+
+**HNSW Index**
+Hierarchical Navigable Small World - a graph-based index that enables fast similarity search without comparing all 1M vectors. Think of it as a multi-level map: start with wide jumps at the top level, zoom in at lower levels. Result: query latency of 10–50ms instead of seconds.
+
+```sql
+CREATE INDEX ON documents
+USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
+```
+
+---
+
+### API & Frontend
+
+**Amazon API Gateway**
+Exposes the FastAPI retrieval endpoint to the internet. We use API Gateway because it handles SSL termination, rate limiting, and Cognito JWT authorization out of the box - without any additional infrastructure.
+
+**FastAPI on Lambda (Mangum)**
+Handles retrieval requests: takes a user query, converts it to an embedding, runs HNSW search on pgvector with metadata filters, and passes results to Claude 3 for response generation. Mangum is a thin adapter that makes FastAPI run inside Lambda.
+
+**Amazon CloudFront + S3 (Frontend)**
+Serves the React frontend (document upload UI + chat interface) as a static site. CloudFront acts as a CDN - low latency globally, HTTPS by default, and WAF integration for DDoS protection.
+
+---
+
+### Security
+
+**Amazon Cognito**
+Manages user authentication for the frontend (sign up, login, JWT tokens). API Gateway validates the Cognito JWT on every request - unauthenticated calls are rejected before they reach Lambda. We use Cognito because it's fully managed, supports MFA, and integrates natively with API Gateway.
+
+**AWS Secrets Manager**
+Stores sensitive credentials: Aurora DB password, any third-party API keys. Lambda functions fetch secrets at runtime via IAM role - no hardcoded credentials anywhere in the codebase. Secrets are automatically rotated.
+
+**AWS KMS**
+Encrypts data at rest: S3 buckets, Aurora DB, SQS queues all use KMS-managed keys. This ensures that even if someone gains physical access to the underlying storage, data is unreadable without the KMS key.
+
+**VPC + Private Subnets**
+Aurora and Lambda run inside a private VPC subnet - no direct internet exposure. Lambda reaches AWS services via NAT Gateway or VPC Endpoints depending on the environment. See the architectural decision below.
+
+**IAM Least Privilege**
+Each Lambda function has its own IAM role with only the permissions it needs. The chunking Lambda can read S3 but cannot call Bedrock. The embedding Lambda can call Bedrock but cannot write to S3. This limits blast radius if a function is compromised.
+
+**AWS WAF**
+Attached to CloudFront and API Gateway. Blocks common web attacks (SQL injection, XSS) and rate-limits requests to prevent abuse.
+
+---
+
+### Observability
+
+**CloudWatch Logs**
+All Lambda functions emit structured JSON logs automatically. We use structured logging (JSON instead of plain text) so logs are queryable with CloudWatch Log Insights - find all errors for a specific document, measure p99 latency, etc.
+
+```json
+{
+  "event": "embedding_batch_complete",
+  "doc_id": "abc123",
+  "chunks": 12,
+  "model": "amazon.titan-embed-text-v2",
+  "model_version": "v2",
+  "latency_ms": 1240,
+  "environment": "prod"
+}
+```
+
+**CloudWatch Metrics (custom namespace: `RAG/Pipeline`)**
+We publish three pipeline-specific metrics that standard AWS metrics don't cover:
+- `IndexStalenessRate` - % of S3 documents not yet reflected in pgvector
+- `EmbeddingPipelineLag` - SQS queue depth over time (how far behind is the pipeline?)
+- `ChunkingStrategyCoverage` - % of documents processed per chunking strategy
+
+**CloudWatch Alarms → SNS → Slack + Email**
+Alarms trigger when error rate exceeds threshold or DLQ receives messages. SNS fans out to both email and a Slack webhook - the team is notified immediately without checking dashboards.
+
+**AWS X-Ray**
+Distributed tracing across Lambda → Bedrock → Aurora. Pinpoints exactly where latency comes from in the end-to-end request path. Especially useful when debugging slow embedding calls or cold starts.
+
+**Step Functions Execution History**
+Every document ingestion is a tracked execution with visual state graph. You can see exactly which step failed, what the input/output was, and replay failed executions - without digging through logs.
+
+---
+
+### Infrastructure & CI/CD
+
+**Terraform**
+All AWS resources are defined as code in Terraform modules. We use Terraform (not AWS CDK) because it's cloud-agnostic, more widely adopted in the industry, and its declarative syntax makes infrastructure diffs easy to review in pull requests.
+
+**GitHub Actions**
+Automated pipeline that runs on every push to main:
+1. Run pytest (unit + integration tests)
+2. Terraform plan (show what will change)
+3. Deploy to staging
+4. Run RAGAS evaluation (measure RAG quality)
+5. Manual approval gate
+6. Deploy to prod
+
+---
+
+## Architectural Decision: NAT Gateway vs VPC Endpoints
+
+This is a cost vs. security trade-off that depends on the environment.
+
+### Option A - NAT Gateway (current setup)
+
+Traffic from Lambda to AWS services (Bedrock, SQS, Secrets Manager) routes through a NAT Gateway and exits/re-enters the AWS network.
+
+| Service | Cost/month |
+|---|---|
+| NAT Gateway (fixed) | ~$32 |
+| NAT Gateway (traffic, low volume) | ~$1 |
+| S3 Gateway Endpoint | Free |
+| **Total networking** | **~$33/month** |
+
+### Option B - VPC Interface Endpoints (highly regulated environments)
+
+Traffic never leaves the AWS private network. Required for compliance frameworks like **HIPAA, PCI-DSS, SOC2, FedRAMP** where data exfiltration risk must be minimised at the network layer.
+
+| Endpoint | Type | Cost (2 AZ) |
+|---|---|---|
+| S3 | Gateway | Free |
+| Bedrock | Interface | ~$14.60/month |
+| SQS | Interface | ~$14.60/month |
+| Secrets Manager | Interface | ~$14.60/month |
+| Step Functions | Interface | ~$14.60/month |
+| CloudWatch Logs | Interface | ~$14.60/month |
+| X-Ray | Interface | ~$14.60/month |
+| **Total networking** | | **~$87/month** |
+
+### Decision
+
+| | NAT Gateway | VPC Endpoints |
+|---|---|---|
+| Traffic path | Exits AWS network | Stays inside AWS network |
+| Security posture | Standard | Required for regulated industries |
+| Cost (low traffic) | **~$33/month** | ~$87/month |
+| Cost (>700GB/month) | Expensive ($0.045/GB) | **More economical** |
+| Compliance (HIPAA/PCI) | Not sufficient | **Required** |
+
+**This project uses NAT Gateway** - appropriate for a standard SaaS workload. For a healthcare, financial, or government deployment, the architecture would switch to full VPC Interface Endpoints to satisfy compliance requirements, accepting the higher fixed cost in exchange for zero data exfiltration risk.
+
+---
+
+## Cost Breakdown (Portfolio / Low Traffic)
+
+| Service | Cost/month | Note |
+|---|---|---|
+| Aurora Serverless v2 (auto-pause) | ~$5–10 | Scales to 0 when idle |
+| NAT Gateway | ~$33 | See networking decision above |
+| Lambda + SQS + Step Functions | ~$1 | Pay per use, near zero at low traffic |
+| S3 + CloudFront | ~$1 | Minimal storage + CDN |
+| API Gateway | ~$1 | Pay per request |
+| CloudWatch + X-Ray | ~$2 | Log storage + traces |
+| Cognito | ~$0 | Free up to 50,000 MAU |
+| Secrets Manager | ~$1 | $0.40 per secret |
+| KMS | ~$1 | $1 per key/month |
+| **Total** | **~$45–50/month** | |
+
+---
+
+## Job States (Step Functions)
+
+Every document ingestion is a tracked job:
+
+```
+PENDING → RUNNING → COMPLETED
+                 ↘ FAILED → DLQ (dead-letter queue)
+                              ↓
+                         CloudWatch Alarm
+                              ↓
+                         SNS → Slack + Email
+```
+
+- **Retry policy**: 3 attempts with exponential backoff (1s, 2s, 4s)
+- **Dead-letter queue**: messages go to SQS DLQ after max retries
+- **Execution history**: Step Functions console, last 90 days
+- **Config per environment**: SSM Parameter Store (`/rag-pipeline/dev/`, `/rag-pipeline/prod/`)
+
+---
+
+## RAG Quality Evaluation (RAGAS)
+
+The pipeline includes an evaluation module that measures retrieval and generation quality - not just whether the system runs, but whether it produces good answers:
+
+| Metric | What it measures |
+|---|---|
+| Faithfulness | Is the answer grounded in retrieved context? |
+| Answer Relevancy | Is the answer relevant to the question? |
+| Context Precision | Are the retrieved chunks actually useful? |
+| Context Recall | Were all relevant chunks retrieved? |
+
+RAGAS evaluation runs automatically in CI/CD after every staging deploy.
+
+---
+
+## Project Structure
+
+```
+rag-production-pipeline/
+├── ingestion/          # S3 event handling, CDC logic
+├── chunking/           # Fixed-size, sentence-aware, hierarchical strategies
+├── embedding/          # Batch embedding pipeline, model versioning
+├── indexing/           # pgvector upsert, HNSW index management
+├── retrieval/          # FastAPI app, metadata filters, reranking
+├── orchestration/      # Step Functions state machine definitions
+├── evaluation/         # RAGAS evaluation pipeline
+├── observability/      # CloudWatch metrics publisher, structured logger
+├── infra/              # Terraform modules and environments
+│   ├── modules/
+│   │   ├── ingestion/
+│   │   ├── processing/
+│   │   ├── storage/
+│   │   ├── retrieval/
+│   │   ├── security/
+│   │   ├── frontend/
+│   │   └── observability/
+│   └── envs/
+│       ├── dev/
+│       ├── staging/
+│       └── prod/
+├── frontend/           # React app (upload UI + chat interface)
+├── tests/              # Unit + integration tests
+├── .github/workflows/  # GitHub Actions CI/CD
+└── docker-compose.yml  # Local dev (Postgres + pgvector + LocalStack)
+```
+
+---
+
+## Local Development
+
+```bash
+# Start local stack (Postgres + pgvector + LocalStack for AWS services)
+docker-compose up
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run tests
+pytest tests/
+
+# Run API locally
+uvicorn retrieval.main:app --reload
+```
+
+---
+
+## Status
+
+> Architecture defined. Implementation in progress.
+
+---
+
+## References
+
+- [pgvector HNSW indexing](https://github.com/pgvector/pgvector)
+- [AWS Bedrock Titan Embeddings v2](https://aws.amazon.com/bedrock/)
+- [RAGAS - RAG Evaluation Framework](https://docs.ragas.io/)
+- [Step Functions - Amazon States Language](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-amazon-states-language.html)
