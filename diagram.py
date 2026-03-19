@@ -2,13 +2,13 @@
 AWS Architecture Diagram - RAG Production Pipeline
 Run: pip install diagrams && python diagram.py
 Requires Graphviz: brew install graphviz
-Output: images/architecture_v8.png
+Output: images/architecture_v9.png
 """
 
 from diagrams import Diagram, Cluster, Edge
 from diagrams.aws.storage import S3
 from diagrams.aws.compute import Lambda
-from diagrams.aws.database import Aurora
+from diagrams.aws.database import Aurora, Dynamodb
 from diagrams.aws.ml import Bedrock
 from diagrams.aws.integration import SQS
 from diagrams.aws.network import APIGateway, CloudFront, NATGateway
@@ -26,7 +26,7 @@ graph_attr = {
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v8",
+    filename="images/architecture_v9",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
@@ -45,12 +45,15 @@ with Diagram(
 
     with Cluster("AWS Managed - Pipeline"):
         doc_s3 = S3("S3\n(raw documents)")
-        sqs = SQS("SQS Queue\n(+ DLQ)")
+        sqs = SQS("SQS Queue FIFO\n(+ DLQ)")
 
     with Cluster("AWS Managed - Bedrock"):
         kb = Bedrock("Knowledge Base")
         titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
         claude = Bedrock("Claude 3 Haiku\n(LLM)")
+
+    with Cluster("State & Metadata"):
+        dynamo = Dynamodb("DynamoDB\n(jobs · sessions · docs)")
 
     with Cluster("Security"):
         secrets = SecretsManager("Secrets Manager")
@@ -78,13 +81,16 @@ with Diagram(
     # ── FLOW 1 - INGESTION ──
     apigw >> presigned_fn
     presigned_fn >> doc_s3
+    presigned_fn >> dynamo
     doc_s3 >> Edge(label="S3 Event") >> sqs
     sqs >> ingestion_fn
     ingestion_fn >> aurora
+    ingestion_fn >> dynamo
 
     # ── FLOW 2 - RETRIEVAL ──
     apigw >> retrieval_fn
     retrieval_fn >> aurora
+    retrieval_fn >> dynamo
 
     # ── Lambda → Bedrock via NAT GW ──
     ingestion_fn >> nat
