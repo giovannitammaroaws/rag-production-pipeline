@@ -8,7 +8,7 @@ Production-grade Retrieval-Augmented Generation pipeline on AWS. Handles documen
 
 Two independent flows share the same Aurora pgvector database.
 
-![Architecture](images/architecture.png)
+![Architecture](images/architecture_v2.png)
 
 ```
 FLOW 1 - INGESTION (user uploads a document)

@@ -27,7 +27,7 @@ graph_attr = {
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture",
+    filename="images/architecture_v2",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
