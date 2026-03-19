@@ -79,10 +79,34 @@ Orchestrates the multi-step pipeline (chunking → embedding → indexing) as a 
 Runs each pipeline step (chunking, embedding, indexing, retrieval) as isolated, stateless functions. We use Lambda because it scales automatically from 0 to 1000 concurrent executions, costs nothing when idle, and each function has its own IAM role with least-privilege permissions.
 
 **AWS Bedrock - Titan Embeddings v2**
-Converts text chunks into vector embeddings (numerical representations of meaning). We use Bedrock because it's fully managed - no GPU infrastructure to provision or maintain - and Titan Embeddings v2 produces 1536-dimensional vectors with strong semantic quality. Requests are batched (up to 500 items per call) to reduce cost and latency by ~100x vs per-document calls.
+Used in two distinct moments of the pipeline:
 
-**AWS Bedrock - Claude 3**
-Generates the final natural language response given the retrieved context. We use Claude 3 on Bedrock (not OpenAI) to keep everything AWS-native, avoid external API dependencies, and benefit from IAM-based auth instead of managing API keys.
+1. **During ingestion** - every text chunk is converted into a vector of 1536 numbers that represents its semantic meaning. This is called embedding. Two chunks with similar meaning will produce numerically close vectors. These vectors are then stored (indexed) in Aurora pgvector with an HNSW index so they can be searched quickly.
+
+2. **During retrieval** - when a user asks a question, pgvector does not understand words, only numbers. So before searching, the user query is converted into a vector using the same Titan model. pgvector then compares that query vector against all stored vectors and returns the most similar chunks.
+
+```
+"how does the refund work?" -> Titan -> [0.45, -0.12, 0.88, ...] -> pgvector HNSW search -> top 5 chunks
+```
+
+We use Titan Embeddings v2 and not alternatives like OpenAI text-embedding-3 because we do not want external dependencies outside AWS. Authentication is handled via IAM role - no API keys to manage or rotate. Requests are batched (up to 500 items per call) to reduce cost and latency by ~100x vs per-document calls.
+
+**AWS Bedrock - Claude 3 Haiku**
+Called only at the end of the retrieval phase, after pgvector has already found the relevant chunks. Claude does not search anything - it receives the top K chunks plus the original user question, reads them, and generates a natural language answer based exclusively on that context.
+
+```
+user question
+    +
+top 5 chunks from pgvector
+    |
+    v
+Claude 3 Haiku on Bedrock
+    |
+    v
+natural language answer grounded in your documents
+```
+
+We use Claude 3 on Bedrock (not OpenAI GPT) for the same reason as Titan - zero external dependencies, IAM-based auth, everything stays inside AWS.
 
 ---
 
