@@ -2,7 +2,7 @@
 AWS Architecture Diagram - RAG Production Pipeline
 Run: pip install diagrams && python diagram.py
 Requires Graphviz: brew install graphviz
-Output: images/architecture_v6.png
+Output: images/architecture_v8.png
 """
 
 from diagrams import Diagram, Cluster, Edge
@@ -22,19 +22,18 @@ graph_attr = {
     "bgcolor": "white",
     "pad": "0.8",
     "splines": "ortho",
-    "rankdir": "LR",
 }
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v7",
+    filename="images/architecture_v8",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
 ):
     user = Users("User")
 
-    # ── FRONTEND (AWS Managed) ──
+    # ── OUTSIDE VPC ──
     with Cluster("Frontend"):
         waf = WAF("WAF")
         cf = CloudFront("CloudFront CDN")
@@ -44,33 +43,27 @@ with Diagram(
     cognito = Cognito("Cognito\nUser Pool")
     apigw = APIGateway("API Gateway\nPOST /upload-url\nPOST /query")
 
-    # ── PIPELINE (AWS Managed) ──
     with Cluster("AWS Managed - Pipeline"):
         doc_s3 = S3("S3\n(raw documents)")
         sqs = SQS("SQS Queue\n(+ DLQ)")
 
-    # ── BEDROCK (AWS Managed) ──
     with Cluster("AWS Managed - Bedrock"):
         kb = Bedrock("Knowledge Base")
         titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
         claude = Bedrock("Claude 3 Haiku\n(LLM)")
 
-    # ── SECURITY ──
     with Cluster("Security"):
         secrets = SecretsManager("Secrets Manager")
         kms = KMS("KMS")
 
-    # ── OBSERVABILITY ──
     with Cluster("Observability"):
         cw = Cloudwatch("CloudWatch")
         xray = XRay("X-Ray")
 
     # ── VPC ──
     with Cluster("VPC"):
-
         with Cluster("Public Subnet"):
             nat = NATGateway("NAT Gateway\n($0.045/hr)")
-
         with Cluster("Private Subnet"):
             presigned_fn = Lambda("Lambda\n(presigned URL)")
             ingestion_fn = Lambda("Lambda\n(ingestion trigger)")
@@ -87,25 +80,27 @@ with Diagram(
     presigned_fn >> doc_s3
     doc_s3 >> Edge(label="S3 Event") >> sqs
     sqs >> ingestion_fn
-    ingestion_fn >> nat
-    nat >> kb
-    kb >> doc_s3
-    kb >> titan
-    kb >> aurora
+    ingestion_fn >> aurora
 
     # ── FLOW 2 - RETRIEVAL ──
     apigw >> retrieval_fn
+    retrieval_fn >> aurora
+
+    # ── Lambda → Bedrock via NAT GW ──
+    ingestion_fn >> nat
     retrieval_fn >> nat
+    nat >> kb
+    kb >> titan
     kb >> claude
-    kb >> aurora
+    nat >> secrets
 
     # ── SECURITY ──
     aurora >> kms
     doc_s3 >> kms
     sqs >> kms
-    aurora >> secrets
     retrieval_fn >> secrets
     ingestion_fn >> secrets
+    aurora >> secrets
 
     # ── OBSERVABILITY ──
     retrieval_fn >> cw
