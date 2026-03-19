@@ -1,0 +1,301 @@
+openapi: 3.1.0
+info:
+  title: RAG Production Pipeline API
+  version: 1.0.0
+  description: >
+    Event-driven RAG pipeline on AWS. Documents are uploaded directly to S3
+    via presigned URL, ingested asynchronously by Bedrock Knowledge Bases,
+    and queried via Bedrock RetrieveAndGenerate with session history.
+
+servers:
+  - url: https://{api_id}.execute-api.us-east-1.amazonaws.com/prod
+    description: Production
+  - url: https://{api_id}.execute-api.us-east-1.amazonaws.com/staging
+    description: Staging
+
+security:
+  - CognitoJWT: []
+
+paths:
+
+  /upload-url:
+    post:
+      summary: Get a presigned S3 URL to upload a document
+      description: >
+        Returns a presigned S3 URL valid for 15 minutes. The client uploads
+        the file directly to S3 - the file never passes through Lambda.
+        Max file size 50MB, content-type application/pdf only.
+        A document entry is created in DynamoDB with status PENDING.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUrlRequest'
+      responses:
+        '200':
+          description: Presigned URL generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /status/{doc_id}:
+    get:
+      summary: Get the ingestion status of a document
+      description: >
+        Poll this endpoint after uploading a document to know when it is
+        ready to query. Typical ingestion time is 1-3 minutes depending
+        on document size.
+      parameters:
+        - name: doc_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /query:
+    post:
+      summary: Query the knowledge base
+      description: >
+        Retrieves relevant chunks from Aurora pgvector via HNSW similarity
+        search and generates a grounded answer using Claude 3 Haiku.
+        Pass session_id to maintain conversation history across turns.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: Answer generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /documents/{doc_id}:
+    delete:
+      summary: Delete a document (right to be forgotten)
+      description: >
+        Permanently deletes the document and all its derivatives.
+        Cascade order: S3 (PDF) → Aurora (chunks + vectors) →
+        DynamoDB documents table → DynamoDB jobs table.
+        Session history referencing this document expires via TTL within 24h.
+        See ADR 003 for the session deletion strategy.
+      parameters:
+        - name: doc_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+
+  securitySchemes:
+    CognitoJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Cognito User Pool JWT. Obtain via POST to the Cognito token endpoint
+        after authenticating with email + OTP MFA.
+
+  schemas:
+
+    UploadUrlRequest:
+      type: object
+      required: [filename, content_type]
+      properties:
+        filename:
+          type: string
+          example: annual_report_2025.pdf
+        content_type:
+          type: string
+          enum: [application/pdf]
+          example: application/pdf
+
+    UploadUrlResponse:
+      type: object
+      properties:
+        doc_id:
+          type: string
+          format: uuid
+          description: Use this to poll /status/{doc_id} after upload
+          example: uuid-1234-abcd
+        upload_url:
+          type: string
+          format: uri
+          description: Presigned S3 URL, valid for 15 minutes
+        expires_in:
+          type: integer
+          example: 900
+          description: Seconds until the presigned URL expires
+
+    StatusResponse:
+      type: object
+      properties:
+        doc_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETE, FAILED, QUARANTINED]
+        chunk_count:
+          type: integer
+          description: Number of chunks indexed in Aurora. Present only when COMPLETE.
+          example: 47
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          description: Present only when COMPLETE or FAILED.
+        error_message:
+          type: string
+          description: Present only when FAILED.
+
+    QueryRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          example: What is the revenue for 2025?
+        session_id:
+          type: string
+          description: >
+            Pass to maintain conversation history. If omitted, a new
+            stateless session is created and not persisted.
+          example: sess-abc-123
+
+    QueryResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+          description: Grounded answer generated by Claude 3 Haiku
+          example: The 2025 revenue was $4.2B, a 12% increase over 2024.
+        session_id:
+          type: string
+          description: Use in subsequent requests to maintain conversation context
+        sources:
+          type: array
+          description: Documents used to generate the answer
+          items:
+            type: object
+            properties:
+              doc_id:
+                type: string
+                format: uuid
+              filename:
+                type: string
+              page:
+                type: integer
+        latency_ms:
+          type: integer
+          example: 340
+
+    DeleteResponse:
+      type: object
+      properties:
+        doc_id:
+          type: string
+          format: uuid
+        deleted_at:
+          type: string
+          format: date-time
+        stores_cleaned:
+          type: array
+          items:
+            type: string
+          example: [s3, aurora_chunks, dynamodb_documents, dynamodb_jobs]
+        session_note:
+          type: string
+          example: Session history referencing this document will expire within 24h via TTL
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        request_id:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: User does not own this resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Rate limit exceeded (100 req/min per user)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
