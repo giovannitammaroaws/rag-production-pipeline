@@ -8,7 +8,7 @@ Production-grade Retrieval-Augmented Generation pipeline on AWS. Handles documen
 
 Two independent flows share the same Aurora pgvector database.
 
-![Architecture](images/architecture_v4.png)
+![Architecture](images/architecture_v5.png)
 
 ```
 ONE API GATEWAY — two routes:

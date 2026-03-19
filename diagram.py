@@ -27,7 +27,7 @@ graph_attr = {
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v4",
+    filename="images/architecture_v5",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
@@ -110,6 +110,7 @@ with Diagram(
     sqs >> kms
     retrieval >> secrets
     chunking >> secrets
+    aurora >> secrets
 
     # ── OBSERVABILITY ──
     retrieval >> cw
