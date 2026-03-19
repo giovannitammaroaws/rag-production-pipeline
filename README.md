@@ -94,11 +94,12 @@ SHARED INFRASTRUCTURE
 | Custom metrics | CloudWatch Metrics | Three pipeline metrics not covered by AWS defaults: IndexStalenessRate, EmbeddingPipelineLag, ChunkingStrategyCoverage |
 | Alerting | CloudWatch Alarms + SNS | Triggers on error thresholds or DLQ messages - fans out to Slack and email immediately |
 | Distributed tracing | AWS X-Ray | Traces full request path Lambda → Bedrock → Aurora - pinpoints where latency comes from |
-| Config per environment | AWS SSM Parameter Store | dev/staging/prod configs stored separately, fetched at Lambda startup |
+| Config per environment | AWS SSM Parameter Store | Stores non-secret configuration (Bedrock model IDs, chunk size, environment URLs) separately per environment (dev/staging/prod). Unlike Secrets Manager it is not for passwords - it is for settings that change between environments but are not sensitive. Nearly free. |
 | Infrastructure as code | Terraform | Cloud-agnostic, widely adopted, infrastructure diffs visible in pull requests. Modular structure allows turning NAT GW on/off independently |
 | CI/CD | GitHub Actions | Auto-deploy on push, runs tests + Terraform plan + RAGAS evaluation before prod |
 | RAG quality evaluation | RAGAS | Measures Faithfulness, Relevancy, Context Precision, Context Recall after every staging deploy - quality gate before prod |
 | Local development | Docker Compose + LocalStack | Run the full stack locally without AWS costs - Postgres+pgvector + AWS service emulation |
+| Architecture diagram | diagram.py (Python diagrams library) | Generates images/architecture.png with official AWS icons as code. Run `python diagram.py` to regenerate after architecture changes. Versioned in git alongside the code |
 
 ---
 
