@@ -2,7 +2,7 @@
 AWS Architecture Diagram - RAG Production Pipeline
 Run: pip install diagrams && python diagram.py
 Requires Graphviz: brew install graphviz
-Output: images/architecture_v2.png
+Output: images/architecture_v3.png
 """
 
 from diagrams import Diagram, Cluster, Edge
@@ -27,7 +27,7 @@ graph_attr = {
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v2",
+    filename="images/architecture_v3",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
