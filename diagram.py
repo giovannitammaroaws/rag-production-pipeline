@@ -19,9 +19,9 @@ from diagrams.onprem.client import Users
 from diagrams.onprem.workflow import Airflow as Prefect
 
 graph_attr = {
-    "fontsize": "18",
+    "fontsize": "20",
     "bgcolor": "white",
-    "pad": "0.8",
+    "pad": "0.5",
     "splines": "ortho",
 }
 
@@ -34,7 +34,7 @@ with Diagram(
 ):
     user = Users("User")
 
-    with Cluster("Frontend (S3 + CloudFront)"):
+    with Cluster("Frontend"):
         waf = WAF("WAF")
         cf = CloudFront("CloudFront CDN")
         fe_s3 = S3("React App (S3)")
@@ -42,25 +42,17 @@ with Diagram(
 
     cognito = Cognito("Cognito\nUser Pool")
 
-    with Cluster("Security"):
-        secrets = SecretsManager("Secrets Manager\n(DB credentials)")
-        kms = KMS("KMS\n(encryption at rest)")
-
-    with Cluster("Observability"):
-        cw = Cloudwatch("CloudWatch\nLogs + Metrics + Alarms")
-        xray = XRay("X-Ray\n(tracing)")
-
     with Cluster("VPC - Private Subnets"):
 
-        nat = NATGateway("NAT Gateway\n($0.045/hr)")
+        nat = NATGateway("NAT Gateway")
 
         with Cluster("FLOW 1 - Ingestion"):
             apigw_ingest = APIGateway("API Gateway\n(presigned URL)")
-            presigned_fn = Lambda("Lambda\n(generate presigned URL)")
+            presigned_fn = Lambda("Lambda\n(presigned URL)")
             doc_s3 = S3("S3\n(raw documents)")
             sqs = SQS("SQS Queue\n(+ DLQ)")
             sf = StepFunctions("Step Functions\n(job state)")
-            prefect = Prefect("Prefect Flow\n(Python orchestration)")
+            prefect = Prefect("Prefect Flow")
 
             with Cluster("Prefect Tasks"):
                 chunking = Lambda("@task\nChunking")
@@ -68,60 +60,59 @@ with Diagram(
                 indexing = Lambda("@task\nIndexing")
 
         with Cluster("FLOW 2 - Retrieval"):
-            apigw_retrieval = APIGateway("API Gateway\n(retrieval)")
+            apigw = APIGateway("API Gateway\n(retrieval)")
             retrieval = Lambda("FastAPI\n(Lambda + Mangum)")
 
         with Cluster("Shared"):
             aurora = Aurora("Aurora PostgreSQL\nServerless v2\n+ pgvector + HNSW")
 
         with Cluster("AI Models (Bedrock)"):
-            titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
-            claude = Bedrock("Claude 3 Haiku\n(LLM inference)")
+            titan = Bedrock("Titan Embeddings v2")
+            claude = Bedrock("Claude 3 Haiku")
 
-    # ── FLOW 1 - INGESTION ──
-    # 1. user logs in
-    user >> Edge(label="1. login") >> cognito
-    # 2. user requests presigned URL (with JWT)
-    user >> Edge(label="2. GET /upload-url + JWT") >> apigw_ingest
-    apigw_ingest >> Edge(label="validate JWT") >> cognito
+    with Cluster("Security"):
+        secrets = SecretsManager("Secrets Manager")
+        kms = KMS("KMS")
+
+    with Cluster("Observability"):
+        cw = Cloudwatch("CloudWatch")
+        xray = XRay("X-Ray")
+
+    # User entry point
+    user >> waf
+    waf >> cognito
+    waf >> apigw_ingest
+    waf >> apigw
+
+    # Ingestion flow
     apigw_ingest >> presigned_fn
-    presigned_fn >> Edge(label="presigned URL") >> user
-    # 3. user uploads directly to S3
-    user >> Edge(label="3. upload document") >> doc_s3
-    # 4. pipeline starts
+    presigned_fn >> doc_s3
     doc_s3 >> Edge(label="S3 Event") >> sqs
-    sqs >> sf
-    sf >> prefect
+    sqs >> sf >> prefect
     prefect >> chunking >> embedding >> indexing
-    embedding >> Edge(label="batch embed") >> titan
-    indexing >> Edge(label="upsert + HNSW") >> aurora
+    embedding >> titan
+    indexing >> aurora
 
-    # ── FLOW 2 - RETRIEVAL ──
-    user >> Edge(label="question + JWT") >> apigw_retrieval
-    apigw_retrieval >> Edge(label="validate JWT") >> cognito
-    apigw_retrieval >> retrieval
-    retrieval >> Edge(label="1. embed query") >> titan
-    retrieval >> Edge(label="2. HNSW search") >> aurora
-    retrieval >> Edge(label="3. generate answer") >> claude
-    retrieval >> Edge(label="answer") >> user
+    # Retrieval flow
+    apigw >> retrieval
+    retrieval >> titan
+    retrieval >> aurora
+    retrieval >> claude
 
-    # ── SECURITY ──
-    presigned_fn >> secrets
-    retrieval >> secrets
-    chunking >> secrets
-    aurora >> kms
-    doc_s3 >> kms
-    sqs >> kms
-
-    # ── NAT GW outbound ──
+    # NAT outbound
     nat >> titan
     nat >> claude
     nat >> secrets
 
-    # ── OBSERVABILITY ──
-    prefect >> cw
+    # Security
+    retrieval >> secrets
+    chunking >> secrets
+    aurora >> kms
+    doc_s3 >> kms
+
+    # Observability
     sf >> cw
+    prefect >> cw
     retrieval >> cw
     retrieval >> xray
-    chunking >> xray
     embedding >> xray
