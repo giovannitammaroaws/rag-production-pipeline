@@ -6,51 +6,59 @@ Production-grade Retrieval-Augmented Generation pipeline on AWS. Handles documen
 
 ## Architecture
 
+Two independent flows share the same Aurora pgvector database.
+
 ```
-                          ┌─────────────────────────────────────────────┐
-                          │              INGESTION LAYER                │
-                          │                                             │
-  User/App ──────────────▶│  S3 (raw docs)                             │
-  (presigned URL upload)  │       │                                     │
-                          │       ▼                                     │
-                          │  S3 Event Notification                      │
-                          │       │                                     │
-                          │       ▼                                     │
-                          │  SQS Queue (ingestion)                      │
-                          │       │                                     │
-                          └───────┼─────────────────────────────────────┘
-                                  │
-                          ┌───────┼─────────────────────────────────────┐
-                          │       ▼      PROCESSING LAYER               │
-                          │  Step Functions (orchestration)             │
-                          │       │                                     │
-                          │  ┌────▼────┐   ┌──────────┐   ┌─────────┐  │
-                          │  │Chunking │──▶│Embedding │──▶│  Index  │  │
-                          │  │(Lambda) │   │ (Lambda) │   │(Lambda) │  │
-                          │  └─────────┘   └────┬─────┘   └────┬────┘  │
-                          │                     │              │        │
-                          │               AWS Bedrock     pgvector      │
-                          │            (Titan Embed v2)  (Aurora PG)    │
-                          └─────────────────────────────────────────────┘
-                                  │
-                          ┌───────┼─────────────────────────────────────┐
-                          │       ▼      RETRIEVAL LAYER                │
-                          │  API Gateway + Cognito Authorizer           │
-                          │       │                                     │
-                          │  FastAPI (Lambda + Mangum)                  │
-                          │       │                                     │
-                          │  pgvector HNSW search + metadata filters    │
-                          │       │                                     │
-                          │  AWS Bedrock (Claude 3) - LLM response      │
-                          └─────────────────────────────────────────────┘
-                                  │
-                          ┌───────┼─────────────────────────────────────┐
-                          │       ▼      FRONTEND                       │
-                          │  React (S3 + CloudFront)                    │
-                          │  - document upload via presigned URL        │
-                          │  - chat interface                           │
-                          │  - ingestion job status dashboard           │
-                          └─────────────────────────────────────────────┘
+FLOW 1 - INGESTION (user uploads a document)
+=============================================
+
+  React Frontend
+       |
+       | presigned URL upload
+       v
+  Amazon S3  ──── S3 Event Notification ────▶  SQS Queue
+                                                    |
+                                                    v
+                                          Step Functions (orchestration)
+                                                    |
+                                     ┌──────────────┼──────────────┐
+                                     v              v              v
+                               Chunking        Embedding        Indexing
+                               (Lambda)        (Lambda)         (Lambda)
+                                                   |                |
+                                             AWS Bedrock       Aurora pgvector
+                                          Titan Embed v2      (upsert + HNSW)
+
+
+FLOW 2 - RETRIEVAL (user asks a question)
+==========================================
+
+  React Frontend
+       |
+       | HTTP request + JWT token
+       v
+  API Gateway  ──── Cognito Authorizer (validates JWT)
+       |
+       v
+  FastAPI (Lambda + Mangum)
+       |
+       |── 1. convert query to vector (Bedrock Titan Embed v2)
+       |── 2. HNSW similarity search + metadata filters (Aurora pgvector)
+       |── 3. pass top K chunks + question to LLM (Bedrock Claude 3 Haiku)
+       |
+       v
+  natural language answer  ──────────────────────▶  React Frontend
+
+
+SHARED INFRASTRUCTURE
+======================
+
+  Aurora PostgreSQL Serverless v2 + pgvector
+  (written by Flow 1 ingestion, read by Flow 2 retrieval)
+
+  VPC + Private Subnets + NAT Gateway
+  CloudWatch Logs + Metrics + Alarms + X-Ray
+  Terraform (IaC) + GitHub Actions (CI/CD)
 ```
 
 ---
