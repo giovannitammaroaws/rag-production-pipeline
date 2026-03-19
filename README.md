@@ -19,12 +19,15 @@ FLOW 1 - INGESTION (user uploads a document)
   Amazon S3  ──── S3 Event Notification ────▶  SQS Queue
                                                     |
                                                     v
-                                          Step Functions (orchestration)
+                                          Step Functions (trigger + state)
+                                                    |
+                                                    v
+                                          Prefect Flow (Python orchestration)
                                                     |
                                      ┌──────────────┼──────────────┐
                                      v              v              v
-                               Chunking        Embedding        Indexing
-                               (Lambda)        (Lambda)         (Lambda)
+                                  @task           @task          @task
+                                Chunking        Embedding       Indexing
                                                    |                |
                                              AWS Bedrock       Aurora pgvector
                                           Titan Embed v2      (upsert + HNSW)
@@ -70,7 +73,9 @@ SHARED INFRASTRUCTURE
 | Document storage | Amazon S3 | Infinitely scalable, cheap, triggers pipeline automatically via events - no polling |
 | Ingestion trigger | S3 Events + SQS | CDC without polling - only new/changed documents trigger re-processing |
 | Message queue | Amazon SQS | Decouples trigger from processing, built-in retry, dead-letter queue for failed messages |
-| Pipeline orchestration | AWS Step Functions | Visual state machine with explicit PENDING/RUNNING/COMPLETED/FAILED states, 90 days execution history, retry with exponential backoff - no orchestration code to write |
+| Pipeline orchestration | AWS Step Functions | Triggers the Prefect flow and tracks the overall job state (PENDING/RUNNING/COMPLETED/FAILED). Provides 90 days execution history and visual state graph |
+| Data pipeline | Prefect | Orchestrates the ingestion steps (chunking, embedding, indexing) as Python tasks with @task decorator. Chosen over Airflow (too heavy) and raw Step Functions (JSON, hard to debug). Free cloud tier with UI showing every flow run, retry history, and logs |
+| RAG evaluation | RAGAS | Runs in two places: (1) CI/CD quality gate after staging deploy - blocks prod if Faithfulness/Relevancy/Precision/Recall drop below threshold; (2) nightly Prefect scheduled flow that publishes scores to CloudWatch for continuous monitoring |
 | Compute | AWS Lambda | Scales from 0 to 1000 concurrent executions automatically, costs nothing when idle, each function has its own least-privilege IAM role |
 | Embedding model | AWS Bedrock - Titan Embeddings v2 | Converts text to 1536-dimensional vectors. Used twice: at ingestion (chunks) and at retrieval (user query). AWS-native - no external API keys, IAM auth only |
 | LLM inference | AWS Bedrock - Claude 3 Haiku | Called only after pgvector retrieval to generate the final answer. AWS-native, no OpenAI dependency, IAM auth |
@@ -354,6 +359,85 @@ RAGAS evaluation runs automatically in CI/CD after every staging deploy.
 
 ---
 
+## Data Model - What Goes Where
+
+### S3 - raw documents
+```
+s3://bucket/{tenant_id}/{doc_id}/{filename.pdf}
+```
+
+### SQS - trigger message (on every S3 upload)
+```json
+{
+  "doc_id": "uuid-1234",
+  "s3_key": "tenant-abc/uuid-1234/report.pdf",
+  "tenant_id": "tenant-abc",
+  "uploaded_at": "2026-03-19T10:00:00Z",
+  "content_type": "application/pdf"
+}
+```
+
+### Aurora pgvector - two tables
+
+```sql
+-- documents: one row per uploaded file
+CREATE TABLE documents (
+  id            TEXT PRIMARY KEY,
+  tenant_id     TEXT NOT NULL,
+  s3_key        TEXT,
+  title         TEXT,
+  content_type  TEXT,
+  status        TEXT,        -- pending | processing | completed | failed
+  created_at    TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ
+);
+
+-- chunks: one row per chunk, with vector embedding
+CREATE TABLE chunks (
+  id                      TEXT PRIMARY KEY,
+  doc_id                  TEXT REFERENCES documents(id),
+  tenant_id               TEXT,
+  chunk_index             INTEGER,         -- position inside the document
+  content                 TEXT,            -- raw text of the chunk
+  embedding               vector(1536),    -- Titan Embeddings v2 output
+  embedding_model         TEXT,            -- amazon.titan-embed-text-v2
+  embedding_model_version TEXT,            -- for versioning / re-indexing
+  metadata                JSONB,           -- access_level, tags, author, ...
+  created_at              TIMESTAMPTZ
+);
+
+CREATE INDEX ON chunks
+USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
+```
+
+### Secrets Manager
+```
+/rag-pipeline/aurora-connection-string   → "postgresql://user:pass@host/db"
+```
+
+### SSM Parameter Store (per environment)
+```
+/rag-pipeline/dev/bedrock_embed_model    → "amazon.titan-embed-text-v2"
+/rag-pipeline/dev/bedrock_llm_model      → "anthropic.claude-3-haiku-20240307-v1:0"
+/rag-pipeline/dev/chunk_size             → "512"
+/rag-pipeline/prod/bedrock_embed_model   → "amazon.titan-embed-text-v2"
+```
+
+### CloudWatch Logs - structured JSON per Lambda
+```json
+{
+  "event": "chunk_embedded",
+  "doc_id": "uuid-1234",
+  "chunk_index": 3,
+  "model": "amazon.titan-embed-text-v2",
+  "latency_ms": 240,
+  "environment": "prod"
+}
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -363,24 +447,28 @@ rag-production-pipeline/
 ├── embedding/          # Batch embedding pipeline, model versioning
 ├── indexing/           # pgvector upsert, HNSW index management
 ├── retrieval/          # FastAPI app, metadata filters, reranking
+├── flows/              # Prefect flows and tasks (ingestion pipeline)
 ├── orchestration/      # Step Functions state machine definitions
 ├── evaluation/         # RAGAS evaluation pipeline
 ├── observability/      # CloudWatch metrics publisher, structured logger
 ├── infra/              # Terraform modules and environments
 │   ├── modules/
-│   │   ├── ingestion/
-│   │   ├── processing/
-│   │   ├── storage/
-│   │   ├── retrieval/
-│   │   ├── security/
-│   │   ├── frontend/
-│   │   └── observability/
+│   │   ├── networking/    # VPC, subnets, NAT Gateway (toggle on/off)
+│   │   ├── ingestion/     # S3, SQS, S3 event notifications
+│   │   ├── processing/    # Lambda functions, Step Functions
+│   │   ├── storage/       # Aurora PostgreSQL, pgvector setup
+│   │   ├── retrieval/     # API Gateway, Lambda
+│   │   ├── security/      # Cognito, Secrets Manager, KMS, WAF, IAM
+│   │   ├── frontend/      # S3 static hosting, CloudFront
+│   │   └── observability/ # CloudWatch, SNS, X-Ray
 │   └── envs/
 │       ├── dev/
 │       ├── staging/
 │       └── prod/
 ├── frontend/           # React app (upload UI + chat interface)
 ├── tests/              # Unit + integration tests
+├── images/             # Architecture diagrams and AWS deployment screenshots
+├── diagram.py          # Generates images/architecture.png (pip install diagrams)
 ├── .github/workflows/  # GitHub Actions CI/CD
 └── docker-compose.yml  # Local dev (Postgres + pgvector + LocalStack)
 ```
@@ -396,11 +484,20 @@ docker-compose up
 # Install dependencies
 pip install -r requirements.txt
 
+# Start Prefect server locally (pipeline UI on http://localhost:4200)
+prefect server start
+
+# Run the ingestion flow locally
+python flows/ingestion_flow.py
+
+# Run the retrieval API locally
+uvicorn retrieval.main:app --reload
+
 # Run tests
 pytest tests/
 
-# Run API locally
-uvicorn retrieval.main:app --reload
+# Regenerate architecture diagram
+python diagram.py   # outputs to images/architecture.png
 ```
 
 ---
