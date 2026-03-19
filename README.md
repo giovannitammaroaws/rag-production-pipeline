@@ -14,7 +14,18 @@ FLOW 1 - INGESTION (user uploads a document)
 
   React Frontend
        |
-       | presigned URL upload
+       | login (username + password)
+       v
+  Cognito User Pool  ──── returns JWT token
+       |
+       | GET /upload-url  (JWT in header)
+       v
+  API Gateway  ──── Cognito Authorizer (validates JWT)
+       |
+       v
+  Lambda  ──── generates S3 presigned URL
+       |
+       | upload document directly to S3 (presigned URL)
        v
   Amazon S3  ──── S3 Event Notification ────▶  SQS Queue
                                                     |
