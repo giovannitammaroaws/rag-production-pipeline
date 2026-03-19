@@ -20,6 +20,7 @@ Foundational: pipeline works end-to-end, is secure, and observable.
 | 8 | Structured JSON logging across all Lambdas | In progress |
 | 9 | CloudWatch Alarms (error rate, p99 latency, DLQ depth, Aurora CPU) | In progress |
 | 10 | WAF Managed Rules (CommonRuleSet + KnownBadInputs) | In progress |
+| 11 | Locust load tests (`tests/load/`) - p95 latency and error rate under concurrent traffic | In progress |
 
 ---
 
@@ -47,7 +48,11 @@ A single malicious or buggy client can spam `/query` and generate unbounded Bedr
 
 When a user re-uploads a modified document, Bedrock KB creates new chunks but does not delete the old ones. Aurora ends up with two versions of the same document - the LLM receives contradictory context and produces inconsistent answers. Fix: the ingestion trigger Lambda deletes all chunks for `doc_id` from Aurora before calling `start_ingestion_job`.
 
-**6. Virus scanning (ClamAV Lambda Layer)**
+**6. AWS Fault Injection Simulator (chaos engineering)**
+
+The system claims to be resilient but resilience without evidence is just a hypothesis. AWS FIS lets us run controlled experiments against the real infrastructure: terminate the NAT Gateway while queries are in flight, inject latency on Aurora connections, throttle Bedrock API calls. Each experiment has a defined steady state (p99 < 2s, error rate < 1%), a hypothesis ("the system degrades gracefully"), and a rollback condition. Results are documented as evidence that the architecture handles real failure modes - not just theoretical ones. Pairs directly with the VPC Endpoints migration (item 3): run the same NAT Gateway termination experiment before and after to prove the improvement.
+
+**7. Virus scanning (ClamAV Lambda Layer)**
 
 Files go from browser directly to S3 via presigned URL - our code never inspects the content. A malicious PDF can contain embedded scripts or exploit payloads that get processed by Bedrock. A ClamAV Lambda Layer triggered on `s3:ObjectCreated` scans each file before it reaches SQS. Infected files are moved to a quarantine prefix and DynamoDB is updated to `status: QUARANTINED`.
 
