@@ -55,6 +55,40 @@ Production-grade Retrieval-Augmented Generation pipeline on AWS. Handles documen
 
 ---
 
+## Stack at a Glance - What We Use and Why
+
+| Component | Technology | Why |
+|---|---|---|
+| Document storage | Amazon S3 | Infinitely scalable, cheap, triggers pipeline automatically via events - no polling |
+| Ingestion trigger | S3 Events + SQS | CDC without polling - only new/changed documents trigger re-processing |
+| Message queue | Amazon SQS | Decouples trigger from processing, built-in retry, dead-letter queue for failed messages |
+| Pipeline orchestration | AWS Step Functions | Visual state machine with explicit PENDING/RUNNING/COMPLETED/FAILED states, 90 days execution history, retry with exponential backoff - no orchestration code to write |
+| Compute | AWS Lambda | Scales from 0 to 1000 concurrent executions automatically, costs nothing when idle, each function has its own least-privilege IAM role |
+| Embedding model | AWS Bedrock - Titan Embeddings v2 | Converts text to 1536-dimensional vectors. Used twice: at ingestion (chunks) and at retrieval (user query). AWS-native - no external API keys, IAM auth only |
+| LLM inference | AWS Bedrock - Claude 3 Haiku | Called only after pgvector retrieval to generate the final answer. AWS-native, no OpenAI dependency, IAM auth |
+| Vector store | pgvector on Aurora PostgreSQL | Standard PostgreSQL with vector extension - no new infra to learn. HNSW index handles 1M+ vectors at 10-50ms. SQL filters for metadata. Upsert prevents duplicates |
+| Database engine | Aurora Serverless v2 (auto-pause) | Scales to 0 when idle - costs ~$0 when not in use. Auto-scales up when traffic arrives |
+| API layer | Amazon API Gateway | SSL, rate limiting, Cognito JWT authorization out of the box |
+| Backend | FastAPI + Lambda (Mangum) | Python-native, fast to develop, Mangum adapter makes it run inside Lambda |
+| Authentication | Amazon Cognito | Managed user auth (signup, login, JWT). API Gateway validates JWT on every request - no custom auth code |
+| Secrets | AWS Secrets Manager | DB password and API keys fetched at runtime via IAM - no hardcoded credentials anywhere |
+| Encryption at rest | AWS KMS | S3, Aurora, SQS all encrypted with KMS keys - required for compliance |
+| Network isolation | VPC + Private Subnets | Aurora and Lambda not exposed to internet. NAT Gateway for outbound traffic to AWS services |
+| NAT Gateway | AWS NAT Gateway | Allows Lambda in private subnet to reach Bedrock, SQS, Secrets Manager. Activated only when needed via `terraform apply -target=module.networking` |
+| Frontend | React on S3 + CloudFront | Static hosting, global CDN, HTTPS by default, near-zero cost |
+| DDoS / WAF | AWS WAF | Blocks SQL injection, XSS, rate-limits abuse on API Gateway and CloudFront |
+| Structured logging | CloudWatch Logs (JSON) | Queryable logs with CloudWatch Log Insights - find errors by doc_id, measure p99 latency |
+| Custom metrics | CloudWatch Metrics | Three pipeline metrics not covered by AWS defaults: IndexStalenessRate, EmbeddingPipelineLag, ChunkingStrategyCoverage |
+| Alerting | CloudWatch Alarms + SNS | Triggers on error thresholds or DLQ messages - fans out to Slack and email immediately |
+| Distributed tracing | AWS X-Ray | Traces full request path Lambda → Bedrock → Aurora - pinpoints where latency comes from |
+| Config per environment | AWS SSM Parameter Store | dev/staging/prod configs stored separately, fetched at Lambda startup |
+| Infrastructure as code | Terraform | Cloud-agnostic, widely adopted, infrastructure diffs visible in pull requests. Modular structure allows turning NAT GW on/off independently |
+| CI/CD | GitHub Actions | Auto-deploy on push, runs tests + Terraform plan + RAGAS evaluation before prod |
+| RAG quality evaluation | RAGAS | Measures Faithfulness, Relevancy, Context Precision, Context Recall after every staging deploy - quality gate before prod |
+| Local development | Docker Compose + LocalStack | Run the full stack locally without AWS costs - Postgres+pgvector + AWS service emulation |
+
+---
+
 ## Full AWS Stack - What We Use and Why
 
 ### Storage & Ingestion
