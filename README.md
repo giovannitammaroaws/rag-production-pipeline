@@ -30,7 +30,7 @@ Production-grade Retrieval-Augmented Generation on AWS. Event-driven document in
 | [ADR 002 - NAT Gateway vs VPC Endpoints](docs/adr/002-nat-gateway-vs-vpc-endpoints.md) | Phase 1 NAT GW, Phase 2 migration to PrivateLink |
 | [ADR 003 - Session Deletion on Right to Be Forgotten](docs/adr/003-session-deletion-on-document-delete.md) | How session history is handled when a document is deleted (GDPR art. 17) |
 | [SLO](docs/slo.md) | Latency, availability, ingestion health targets with error budgets |
-| [OpenAPI Spec](openapi.yaml) | Full API contract: request/response schemas, error codes, auth |
+| [OpenAPI Spec](openapi.yaml) | API-first contract: defines all 4 endpoints before implementation. Pydantic models and test validators are generated from this file. |
 
 ---
 

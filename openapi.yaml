@@ -1,3 +1,8 @@
+# API-first contract for the RAG Production Pipeline.
+# Defined before implementation - Pydantic models in Lambda handlers
+# and integration test validators are derived from this file.
+# Render interactively: https://editor.swagger.io (paste this file)
+
 openapi: 3.1.0
 info:
   title: RAG Production Pipeline API
