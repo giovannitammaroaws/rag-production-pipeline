@@ -34,7 +34,7 @@ with Diagram(
 ):
     user = Users("User")
 
-    # ── AWS MANAGED SERVICES (outside VPC) ──
+    # ── OUTSIDE VPC (AWS Managed) ──
     with Cluster("Frontend"):
         waf = WAF("WAF")
         cf = CloudFront("CloudFront CDN")
@@ -42,15 +42,12 @@ with Diagram(
         waf >> cf >> fe_s3
 
     cognito = Cognito("Cognito\nUser Pool")
+    apigw = APIGateway("API Gateway\nPOST /upload-url\nPOST /query")
 
-    with Cluster("AWS Managed - Ingestion"):
-        apigw_ingest = APIGateway("API Gateway\n(presigned URL)")
+    with Cluster("AWS Managed - Pipeline"):
         doc_s3 = S3("S3\n(raw documents)")
         sqs = SQS("SQS Queue\n(+ DLQ)")
         sf = StepFunctions("Step Functions\n(job state)")
-
-    with Cluster("AWS Managed - Retrieval"):
-        apigw = APIGateway("API Gateway\n(retrieval)")
 
     with Cluster("AWS Managed - AI"):
         titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
@@ -78,17 +75,16 @@ with Diagram(
                 embedding = Lambda("@task\nEmbedding")
                 indexing = Lambda("@task\nIndexing")
 
-            retrieval = Lambda("FastAPI Lambda\n(Lambda + Mangum)")
+            retrieval = Lambda("FastAPI Lambda\n(retrieval)")
             aurora = Aurora("Aurora PostgreSQL\nServerless v2\n+ pgvector + HNSW")
 
-    # ── USER FLOW ──
+    # ── USER ──
     user >> waf
     waf >> cognito
-    waf >> apigw_ingest
     waf >> apigw
 
     # ── FLOW 1 - INGESTION ──
-    apigw_ingest >> presigned_fn
+    apigw >> presigned_fn
     presigned_fn >> doc_s3
     doc_s3 >> Edge(label="S3 Event") >> sqs
     sqs >> sf
@@ -96,17 +92,16 @@ with Diagram(
     chunking >> embedding >> indexing
     indexing >> aurora
 
-    # Lambda in private subnet → AWS services via NAT GW
-    embedding >> Edge(label="via NAT GW") >> nat
-    nat >> titan
-    nat >> claude
-    nat >> secrets
-
     # ── FLOW 2 - RETRIEVAL ──
     apigw >> retrieval
     retrieval >> aurora
-    retrieval >> titan
-    retrieval >> claude
+
+    # ── Lambda → Bedrock via NAT GW ──
+    embedding >> nat
+    retrieval >> nat
+    nat >> titan
+    nat >> claude
+    nat >> secrets
 
     # ── SECURITY ──
     aurora >> kms

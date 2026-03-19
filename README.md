@@ -11,59 +11,75 @@ Two independent flows share the same Aurora pgvector database.
 ![Architecture](images/architecture_v2.png)
 
 ```
+ONE API GATEWAY — two routes:
+  POST /upload-url  → presigned URL Lambda
+  POST /query       → FastAPI retrieval Lambda
+
+Note: a single API Gateway is used for both flows.
+Same base URL in the frontend, independent throttling per route.
+
+
 FLOW 1 - INGESTION (user uploads a document)
 =============================================
 
-  React Frontend
+  [AWS Managed - outside VPC]
+  React Frontend → Cognito (login, get JWT)
        |
-       | login (username + password)
+       | POST /upload-url + JWT
        v
-  Cognito User Pool  ──── returns JWT token
+  API Gateway ── Cognito Authorizer (validates JWT)
        |
-       | GET /upload-url  (JWT in header)
-       v
-  API Gateway  ──── Cognito Authorizer (validates JWT)
-       |
-       v
-  Lambda  ──── generates S3 presigned URL
-       |
-       | upload document directly to S3 (presigned URL)
-       v
-  Amazon S3  ──── S3 Event Notification ────▶  SQS Queue
-                                                    |
-                                                    v
-                                          Step Functions (trigger + state)
-                                                    |
-                                                    v
-                                          Prefect Flow (Python orchestration)
-                                                    |
-                                     ┌──────────────┼──────────────┐
-                                     v              v              v
-                                  @task           @task          @task
-                                Chunking        Embedding       Indexing
-                                                   |                |
-                                             AWS Bedrock       Aurora pgvector
-                                          Titan Embed v2      (upsert + HNSW)
+       v                                [VPC - Private Subnet]
+  Lambda (presigned URL) ─────────────────────────────────────▶ S3 (raw documents)
+                                                                       |
+                                                              S3 Event Notification
+                                                                       |
+                                                                       v
+                                                                  SQS Queue (+ DLQ)
+                                                                       |
+                                                                       v
+                                                              Step Functions (job state)
+                                                                       |
+                                                                       v
+                                                    ┌──────────────────┼──────────────────┐
+                                                    v                  v                  v
+                                                 @task              @task              @task
+                                               Chunking           Embedding           Indexing
+                                                                      |                   |
+                                                               Bedrock Titan          Aurora pgvector
+                                                            (via NAT Gateway)        (upsert + HNSW)
 
 
 FLOW 2 - RETRIEVAL (user asks a question)
 ==========================================
 
+  [AWS Managed - outside VPC]
   React Frontend
        |
-       | HTTP request + JWT token
+       | POST /query + JWT
        v
-  API Gateway  ──── Cognito Authorizer (validates JWT)
+  API Gateway ── Cognito Authorizer (validates JWT)
+       |
+       v                                [VPC - Private Subnet]
+  FastAPI Lambda (Mangum)
+       |── 1. embed query → Bedrock Titan Embeddings v2 (via NAT Gateway)
+       |── 2. HNSW similarity search + metadata filters → Aurora pgvector
+       |── 3. top K chunks + question → Bedrock Claude 3 Haiku (via NAT Gateway)
        |
        v
-  FastAPI (Lambda + Mangum)
-       |
-       |── 1. convert query to vector (Bedrock Titan Embed v2)
-       |── 2. HNSW similarity search + metadata filters (Aurora pgvector)
-       |── 3. pass top K chunks + question to LLM (Bedrock Claude 3 Haiku)
-       |
-       v
-  natural language answer  ──────────────────────▶  React Frontend
+  natural language answer ──────────────────────▶ React Frontend
+
+
+WHERE THINGS LIVE
+==================
+
+  Outside VPC (AWS Managed):   API Gateway, S3, SQS, Step Functions,
+                                Bedrock, Cognito, CloudFront, WAF,
+                                Secrets Manager, KMS, CloudWatch, X-Ray
+
+  VPC - Public Subnet:          NAT Gateway
+
+  VPC - Private Subnet:         Lambda functions, Aurora PostgreSQL + pgvector
 
 
 SHARED INFRASTRUCTURE
