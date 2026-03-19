@@ -2,7 +2,7 @@
 AWS Architecture Diagram - RAG Production Pipeline
 Run: pip install diagrams && python diagram.py
 Requires Graphviz: brew install graphviz
-Output: images/architecture.png
+Output: images/architecture_v2.png
 """
 
 from diagrams import Diagram, Cluster, Edge
@@ -42,33 +42,36 @@ with Diagram(
 
     cognito = Cognito("Cognito\nUser Pool")
 
-    with Cluster("VPC - Private Subnets"):
+    with Cluster("AWS Managed Services"):
+        apigw_ingest = APIGateway("API Gateway\n(presigned URL)")
+        apigw = APIGateway("API Gateway\n(retrieval)")
+        titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
+        claude = Bedrock("Claude 3 Haiku\n(LLM)")
 
-        nat = NATGateway("NAT Gateway")
+    with Cluster("VPC"):
 
-        with Cluster("FLOW 1 - Ingestion"):
-            apigw_ingest = APIGateway("API Gateway\n(presigned URL)")
-            presigned_fn = Lambda("Lambda\n(presigned URL)")
-            doc_s3 = S3("S3\n(raw documents)")
-            sqs = SQS("SQS Queue\n(+ DLQ)")
-            sf = StepFunctions("Step Functions\n(job state)")
-            prefect = Prefect("Prefect Flow")
+        with Cluster("Public Subnet"):
+            nat = NATGateway("NAT Gateway\n($0.045/hr)")
 
-            with Cluster("Prefect Tasks"):
-                chunking = Lambda("@task\nChunking")
-                embedding = Lambda("@task\nEmbedding")
-                indexing = Lambda("@task\nIndexing")
+        with Cluster("Private Subnet"):
 
-        with Cluster("FLOW 2 - Retrieval"):
-            apigw = APIGateway("API Gateway\n(retrieval)")
-            retrieval = Lambda("FastAPI\n(Lambda + Mangum)")
+            with Cluster("FLOW 1 - Ingestion"):
+                presigned_fn = Lambda("Lambda\n(presigned URL)")
+                doc_s3 = S3("S3\n(raw documents)")
+                sqs = SQS("SQS Queue\n(+ DLQ)")
+                sf = StepFunctions("Step Functions\n(job state)")
+                prefect = Prefect("Prefect Flow")
 
-        with Cluster("Shared"):
-            aurora = Aurora("Aurora PostgreSQL\nServerless v2\n+ pgvector + HNSW")
+                with Cluster("Prefect Tasks"):
+                    chunking = Lambda("@task\nChunking")
+                    embedding = Lambda("@task\nEmbedding")
+                    indexing = Lambda("@task\nIndexing")
 
-        with Cluster("AI Models (Bedrock)"):
-            titan = Bedrock("Titan Embeddings v2")
-            claude = Bedrock("Claude 3 Haiku")
+            with Cluster("FLOW 2 - Retrieval"):
+                retrieval = Lambda("FastAPI\n(Lambda + Mangum)")
+
+            with Cluster("Database"):
+                aurora = Aurora("Aurora PostgreSQL\nServerless v2\n+ pgvector + HNSW")
 
     with Cluster("Security"):
         secrets = SecretsManager("Secrets Manager")
@@ -78,7 +81,7 @@ with Diagram(
         cw = Cloudwatch("CloudWatch")
         xray = XRay("X-Ray")
 
-    # User entry point
+    # User entry
     user >> waf
     waf >> cognito
     waf >> apigw_ingest
@@ -90,19 +93,17 @@ with Diagram(
     doc_s3 >> Edge(label="S3 Event") >> sqs
     sqs >> sf >> prefect
     prefect >> chunking >> embedding >> indexing
-    embedding >> titan
     indexing >> aurora
+
+    # Private → Bedrock via NAT GW
+    embedding >> nat
+    retrieval >> nat
+    nat >> titan
+    nat >> claude
 
     # Retrieval flow
     apigw >> retrieval
-    retrieval >> titan
     retrieval >> aurora
-    retrieval >> claude
-
-    # NAT outbound
-    nat >> titan
-    nat >> claude
-    nat >> secrets
 
     # Security
     retrieval >> secrets
