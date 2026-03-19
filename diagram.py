@@ -41,7 +41,7 @@ with Diagram(
         waf >> cf >> fe_s3
 
     cognito = Cognito("Cognito\nUser Pool")
-    apigw = APIGateway("API Gateway\nPOST /upload-url\nPOST /query")
+    apigw = APIGateway("API Gateway\nPOST /upload-url\nGET  /status/{doc_id}\nPOST /query")
 
     with Cluster("AWS Managed - Pipeline"):
         doc_s3 = S3("S3\n(raw documents)")

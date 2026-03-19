@@ -11,9 +11,10 @@ Two independent flows share the same Aurora pgvector database via Bedrock Knowle
 ![Architecture](images/architecture_v9.png)
 
 ```
-ONE API GATEWAY - two routes:
-  POST /upload-url  → Lambda (presigned URL, 15 lines)
-  POST /query       → Lambda (retrieval, calls Bedrock RetrieveAndGenerate)
+ONE API GATEWAY - three routes:
+  POST /upload-url          → Lambda (presigned URL)
+  GET  /status/{doc_id}     → Lambda (ingestion trigger, reads DynamoDB job status)
+  POST /query               → Lambda (retrieval, calls Bedrock RetrieveAndGenerate)
 
 
 FLOW 1 - INGESTION (user uploads a document)
@@ -28,7 +29,7 @@ FLOW 1 - INGESTION (user uploads a document)
        v
   Lambda (presigned URL)
        |── writes document entry to DynamoDB { doc_id, user_id, status: PENDING }
-       | returns signed S3 URL to client
+       | returns signed S3 URL + doc_id to client
        v
   Client uploads PDF directly to S3 (max 50MB, application/pdf only)
        |
@@ -53,6 +54,22 @@ FLOW 1 - INGESTION (user uploads a document)
   Aurora PostgreSQL Serverless v2
 
 
+FLOW 1b - STATUS CHECK (client polls until document is ready)
+==============================================================
+
+  React Frontend
+       |
+       | GET /status/{doc_id} + JWT   (polls every 5s)
+       v
+  API Gateway (Cognito Authorizer validates JWT)
+       |
+       v
+  Lambda (ingestion trigger)
+       |── reads DynamoDB { doc_id } → { status, chunk_count, completed_at }
+       v
+  { status: "PENDING" | "RUNNING" | "COMPLETE" | "FAILED" } → React Frontend
+
+
 FLOW 2 - RETRIEVAL (user asks a question)
 ==========================================
 
@@ -64,7 +81,7 @@ FLOW 2 - RETRIEVAL (user asks a question)
        |
        v
   Lambda (retrieval)
-       |── reads last N turns from DynamoDB { session_id }
+       |── reads last N turns from DynamoDB { session_id, sort by turn_id DESC, limit 10 }
        | bedrock.retrieve_and_generate() with conversation history
        v
   Bedrock Knowledge Base
@@ -73,7 +90,7 @@ FLOW 2 - RETRIEVAL (user asks a question)
        |── top K chunks + question + history → Claude 3 Haiku
        v
   Lambda (retrieval)
-       |── writes turn to DynamoDB { session_id, role, content, ttl }
+       |── writes turn to DynamoDB { session_id, turn_id: timestamp, role, content, ttl }
        v
   natural language answer → React Frontend
 
@@ -228,18 +245,22 @@ Three logical tables in a single DynamoDB deployment:
 }
 ```
 
-**`sessions` table** - conversation history per user (TTL = 24h)
+**`sessions` table** - one item per turn, not an array (avoids 400KB DynamoDB item limit)
+```
+Partition key: session_id
+Sort key:      turn_id (ISO timestamp - enables pagination and ordering)
+```
 ```json
 {
   "session_id": "sess-abc",
+  "turn_id": "2026-03-19T10:00:00.000Z",
   "user_id": "giovanni",
-  "turns": [
-    {"role": "user", "content": "What is the revenue for 2025?"},
-    {"role": "assistant", "content": "The 2025 revenue was..."}
-  ],
+  "role": "user",
+  "content": "What is the revenue for 2025?",
   "ttl": 1742400000
 }
 ```
+To retrieve the last N turns: `Query(session_id, ScanIndexForward=False, Limit=N)` then reverse client-side.
 
 ---
 
@@ -541,15 +562,17 @@ s3://rag-pipeline-docs/{user_id}/{doc_id}/{filename.pdf}
 }
 ```
 
-### DynamoDB - sessions table (TTL = 24h)
+### DynamoDB - sessions table (one item per turn, TTL = 24h)
+```
+Partition key: session_id   Sort key: turn_id (ISO timestamp)
+```
 ```json
 {
   "session_id": "sess-abc",
+  "turn_id": "2026-03-19T10:00:00.000Z",
   "user_id": "giovanni",
-  "turns": [
-    {"role": "user", "content": "What is the revenue for 2025?"},
-    {"role": "assistant", "content": "The 2025 revenue was $4.2B..."}
-  ],
+  "role": "user",
+  "content": "What is the revenue for 2025?",
   "ttl": 1742400000
 }
 ```
