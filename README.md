@@ -28,6 +28,7 @@ Production-grade Retrieval-Augmented Generation on AWS. Event-driven document in
 | [Cost](docs/cost.md) | Monthly estimate, cost reduction strategies, Bedrock pricing |
 | [ADR 001 - Aurora vs OpenSearch](docs/adr/001-aurora-vs-opensearch.md) | Why pgvector over OpenSearch Serverless ($43/month vs $345/month) |
 | [ADR 002 - NAT Gateway vs VPC Endpoints](docs/adr/002-nat-gateway-vs-vpc-endpoints.md) | Phase 1 NAT GW, Phase 2 migration to PrivateLink |
+| [ADR 003 - Session Deletion on Right to Be Forgotten](docs/adr/003-session-deletion-on-document-delete.md) | How session history is handled when a document is deleted (GDPR art. 17) |
 
 ---
 
