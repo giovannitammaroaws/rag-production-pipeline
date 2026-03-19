@@ -14,6 +14,7 @@ Production-grade Retrieval-Augmented Generation on AWS. Event-driven document in
 - **Operational readiness** - Structured JSON logs, CloudWatch alarms on error rate and p99 latency, X-Ray tracing, DynamoDB job status tracking, SQS DLQ with SNS alerting.
 - **Infrastructure as code** - Terraform modules with remote state on S3 + DynamoDB lock, separate environments (dev / staging / prod).
 - **Planned evolution** - Roadmap with three phases: core pipeline, production hardening (re-ranking, ACL, VPC endpoints), advanced ML (HyDE, semantic caching, model routing). Each phase documented with rationale.
+- **API-first design** - `openapi.yaml` defines the full API contract (endpoints, request/response schemas, error codes) before any implementation. Pydantic models in Lambda handlers and integration test validators are derived from this file - the spec is the single source of truth.
 
 ---
 
