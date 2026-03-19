@@ -2,7 +2,7 @@
 AWS Architecture Diagram - RAG Production Pipeline
 Run: pip install diagrams && python diagram.py
 Requires Graphviz: brew install graphviz
-Output: images/architecture_v3.png
+Output: images/architecture_v6.png
 """
 
 from diagrams import Diagram, Cluster, Edge
@@ -16,7 +16,6 @@ from diagrams.aws.security import Cognito, SecretsManager, KMS, WAF
 from diagrams.aws.management import Cloudwatch
 from diagrams.aws.devtools import XRay
 from diagrams.onprem.client import Users
-from diagrams.onprem.workflow import Airflow as Prefect
 
 graph_attr = {
     "fontsize": "18",
@@ -27,14 +26,14 @@ graph_attr = {
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v5",
+    filename="images/architecture_v6",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
 ):
     user = Users("User")
 
-    # ── OUTSIDE VPC (AWS Managed) ──
+    # ── FRONTEND (AWS Managed) ──
     with Cluster("Frontend"):
         waf = WAF("WAF")
         cf = CloudFront("CloudFront CDN")
@@ -44,18 +43,23 @@ with Diagram(
     cognito = Cognito("Cognito\nUser Pool")
     apigw = APIGateway("API Gateway\nPOST /upload-url\nPOST /query")
 
+    # ── PIPELINE (AWS Managed) ──
     with Cluster("AWS Managed - Pipeline"):
         doc_s3 = S3("S3\n(raw documents)")
         sqs = SQS("SQS Queue\n(+ DLQ)")
 
-    with Cluster("AWS Managed - AI"):
+    # ── BEDROCK (AWS Managed) ──
+    with Cluster("AWS Managed - Bedrock"):
+        kb = Bedrock("Knowledge Base")
         titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
         claude = Bedrock("Claude 3 Haiku\n(LLM)")
 
+    # ── SECURITY ──
     with Cluster("Security"):
         secrets = SecretsManager("Secrets Manager")
         kms = KMS("KMS")
 
+    # ── OBSERVABILITY ──
     with Cluster("Observability"):
         cw = Cloudwatch("CloudWatch")
         xray = XRay("X-Ray")
@@ -68,13 +72,8 @@ with Diagram(
 
         with Cluster("Private Subnet"):
             presigned_fn = Lambda("Lambda\n(presigned URL)")
-
-            with Cluster("Prefect Flow"):
-                chunking = Lambda("@task\nChunking")
-                embedding = Lambda("@task\nEmbedding")
-                indexing = Lambda("@task\nIndexing")
-
-            retrieval = Lambda("FastAPI Lambda\n(retrieval)")
+            ingestion_fn = Lambda("Lambda\n(ingestion trigger)")
+            retrieval_fn = Lambda("Lambda\n(retrieval)")
             aurora = Aurora("Aurora PostgreSQL\nServerless v2\n+ pgvector + HNSW")
 
     # ── USER ──
@@ -86,34 +85,29 @@ with Diagram(
     apigw >> presigned_fn
     presigned_fn >> doc_s3
     doc_s3 >> Edge(label="S3 Event") >> sqs
-    sqs >> chunking
-    chunking >> embedding >> indexing
-    indexing >> aurora
+    sqs >> ingestion_fn
+    ingestion_fn >> nat
+    nat >> kb
+    kb >> doc_s3
+    kb >> titan
+    kb >> aurora
 
     # ── FLOW 2 - RETRIEVAL ──
-    apigw >> retrieval
-    retrieval >> aurora
-
-    # ── Lambda → AWS Services via NAT GW ──
-    presigned_fn >> nat
-    chunking >> nat
-    embedding >> nat
-    indexing >> nat
-    retrieval >> nat
-    nat >> titan
-    nat >> claude
-    nat >> secrets
+    apigw >> retrieval_fn
+    retrieval_fn >> nat
+    kb >> claude
+    kb >> aurora
 
     # ── SECURITY ──
     aurora >> kms
     doc_s3 >> kms
     sqs >> kms
-    retrieval >> secrets
-    chunking >> secrets
     aurora >> secrets
+    retrieval_fn >> secrets
+    ingestion_fn >> secrets
 
     # ── OBSERVABILITY ──
-    retrieval >> cw
-    embedding >> cw
-    retrieval >> xray
-    embedding >> xray
+    retrieval_fn >> cw
+    ingestion_fn >> cw
+    retrieval_fn >> xray
+    ingestion_fn >> xray
