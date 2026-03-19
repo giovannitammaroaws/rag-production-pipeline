@@ -38,7 +38,7 @@ FLOW 1 - INGESTION (user uploads a document)
                                                                   SQS Queue (+ DLQ)
                                                                        |
                                                                        v
-                                                              Step Functions (job state)
+                                                              Prefect Flow (job state + orchestration)
                                                                        |
                                                                        v
                                                     ┌──────────────────┼──────────────────┐
@@ -73,7 +73,7 @@ FLOW 2 - RETRIEVAL (user asks a question)
 WHERE THINGS LIVE
 ==================
 
-  Outside VPC (AWS Managed):   API Gateway, S3, SQS, Step Functions,
+  Outside VPC (AWS Managed):   API Gateway, S3, SQS,
                                 Bedrock, Cognito, CloudFront, WAF,
                                 Secrets Manager, KMS, CloudWatch, X-Ray
 
@@ -102,14 +102,13 @@ SHARED INFRASTRUCTURE
 | Document storage | Amazon S3 | Infinitely scalable, cheap, triggers pipeline automatically via events - no polling |
 | Ingestion trigger | S3 Events + SQS | CDC without polling - only new/changed documents trigger re-processing |
 | Message queue | Amazon SQS | Decouples trigger from processing, built-in retry, dead-letter queue for failed messages |
-| Pipeline orchestration | AWS Step Functions | Triggers the Prefect flow and tracks the overall job state (PENDING/RUNNING/COMPLETED/FAILED). Provides 90 days execution history and visual state graph |
-| Data pipeline | Prefect | Orchestrates the ingestion steps (chunking, embedding, indexing) as Python tasks with @task decorator. Chosen over Airflow (too heavy) and raw Step Functions (JSON, hard to debug). Free cloud tier with UI showing every flow run, retry history, and logs |
+| Data pipeline | Prefect | Orchestrates the ingestion steps (chunking, embedding, indexing) as Python tasks with @task decorator. Chosen over Airflow (too heavy). Free cloud tier with UI showing every flow run, retry history, and logs |
 | RAG evaluation | RAGAS | Runs in two places: (1) CI/CD quality gate after staging deploy - blocks prod if Faithfulness/Relevancy/Precision/Recall drop below threshold; (2) nightly Prefect scheduled flow that publishes scores to CloudWatch for continuous monitoring |
 | Compute | AWS Lambda | Scales from 0 to 1000 concurrent executions automatically, costs nothing when idle, each function has its own least-privilege IAM role |
 | Embedding model | AWS Bedrock - Titan Embeddings v2 | Converts text to 1536-dimensional vectors. Used twice: at ingestion (chunks) and at retrieval (user query). AWS-native - no external API keys, IAM auth only |
 | LLM inference | AWS Bedrock - Claude 3 Haiku | Called only after pgvector retrieval to generate the final answer. AWS-native, no OpenAI dependency, IAM auth |
 | Vector store | pgvector on Aurora PostgreSQL | Standard PostgreSQL with vector extension - no new infra to learn. HNSW index handles 1M+ vectors at 10-50ms. SQL filters for metadata. Upsert prevents duplicates |
-| Database engine | Aurora Serverless v2 (auto-pause) | Scales to 0 when idle - costs ~$0 when not in use. Auto-scales up when traffic arrives |
+| Database engine | Aurora Serverless v2 (auto-pause) | Scales to 0 when idle - costs ~$0 when not in use. Auto-scales up when traffic arrives. Multi-AZ enabled - automatic failover to replica in AZ-2 in ~30 seconds, no manual intervention required |
 | API layer | Amazon API Gateway | SSL, rate limiting, Cognito JWT authorization out of the box |
 | Backend | FastAPI + Lambda (Mangum) | Python-native, fast to develop, Mangum adapter makes it run inside Lambda |
 | Authentication | Amazon Cognito | Managed user auth (signup, login, JWT). API Gateway validates JWT on every request - no custom auth code |
@@ -148,9 +147,6 @@ Acts as the buffer between the S3 trigger and the processing pipeline. If the pi
 ---
 
 ### Processing
-
-**AWS Step Functions**
-Orchestrates the multi-step pipeline (chunking → embedding → indexing) as a state machine with explicit states: PENDING, RUNNING, COMPLETED, FAILED. We use Step Functions because it gives us a visual execution graph, built-in retry with exponential backoff, and 90 days of execution history - all without writing orchestration code from scratch.
 
 **AWS Lambda**
 Runs each pipeline step (chunking, embedding, indexing, retrieval) as isolated, stateless functions. We use Lambda because it scales automatically from 0 to 1000 concurrent executions, costs nothing when idle, and each function has its own IAM role with least-privilege permissions.
@@ -193,6 +189,7 @@ We use Claude 3 on Bedrock (not OpenAI GPT) for the same reason as Titan - zero 
 Stores document chunks alongside their vector embeddings and metadata. We chose pgvector over dedicated vector databases (Qdrant, Pinecone, Weaviate) because:
 - It runs on standard PostgreSQL - no new infrastructure to learn or operate
 - Aurora Serverless v2 auto-pauses when idle → **costs ~$0 when not in use** (critical for a portfolio project)
+- Multi-AZ enabled - primary in AZ-1, replica in AZ-2. Automatic failover in ~30 seconds if primary fails, zero manual intervention
 - Supports HNSW indexing for fast approximate nearest-neighbor search at 1M+ vectors
 - Metadata filters use standard SQL WHERE clauses - no proprietary query language
 - Upsert via `INSERT ... ON CONFLICT DO UPDATE` prevents duplicates and HNSW graph fragmentation
@@ -272,9 +269,6 @@ Alarms trigger when error rate exceeds threshold or DLQ receives messages. SNS f
 **AWS X-Ray**
 Distributed tracing across Lambda → Bedrock → Aurora. Pinpoints exactly where latency comes from in the end-to-end request path. Especially useful when debugging slow embedding calls or cold starts.
 
-**Step Functions Execution History**
-Every document ingestion is a tracked execution with visual state graph. You can see exactly which step failed, what the input/output was, and replay failed executions - without digging through logs.
-
 ---
 
 ### Infrastructure & CI/CD
@@ -318,7 +312,6 @@ Traffic never leaves the AWS private network. Required for compliance frameworks
 | Bedrock | Interface | ~$14.60/month |
 | SQS | Interface | ~$14.60/month |
 | Secrets Manager | Interface | ~$14.60/month |
-| Step Functions | Interface | ~$14.60/month |
 | CloudWatch Logs | Interface | ~$14.60/month |
 | X-Ray | Interface | ~$14.60/month |
 | **Total networking** | | **~$87/month** |
@@ -343,7 +336,7 @@ Traffic never leaves the AWS private network. Required for compliance frameworks
 |---|---|---|
 | Aurora Serverless v2 (auto-pause) | ~$5–10 | Scales to 0 when idle |
 | NAT Gateway | ~$33 | See networking decision above |
-| Lambda + SQS + Step Functions | ~$1 | Pay per use, near zero at low traffic |
+| Lambda + SQS + Prefect | ~$1 | Pay per use, near zero at low traffic |
 | S3 + CloudFront | ~$1 | Minimal storage + CDN |
 | API Gateway | ~$1 | Pay per request |
 | CloudWatch + X-Ray | ~$2 | Log storage + traces |
@@ -354,7 +347,7 @@ Traffic never leaves the AWS private network. Required for compliance frameworks
 
 ---
 
-## Job States (Step Functions)
+## Job States (Prefect)
 
 Every document ingestion is a tracked job:
 
@@ -369,7 +362,7 @@ PENDING → RUNNING → COMPLETED
 
 - **Retry policy**: 3 attempts with exponential backoff (1s, 2s, 4s)
 - **Dead-letter queue**: messages go to SQS DLQ after max retries
-- **Execution history**: Step Functions console, last 90 days
+- **Execution history**: Prefect UI, full flow run and task-level history
 - **Config per environment**: SSM Parameter Store (`/rag-pipeline/dev/`, `/rag-pipeline/prod/`)
 
 ---
@@ -477,15 +470,14 @@ rag-production-pipeline/
 ├── embedding/          # Batch embedding pipeline, model versioning
 ├── indexing/           # pgvector upsert, HNSW index management
 ├── retrieval/          # FastAPI app, metadata filters, reranking
-├── flows/              # Prefect flows and tasks (ingestion pipeline)
-├── orchestration/      # Step Functions state machine definitions
+├── flows/              # Prefect flows and tasks
 ├── evaluation/         # RAGAS evaluation pipeline
 ├── observability/      # CloudWatch metrics publisher, structured logger
 ├── infra/              # Terraform modules and environments
 │   ├── modules/
 │   │   ├── networking/    # VPC, subnets, NAT Gateway (toggle on/off)
 │   │   ├── ingestion/     # S3, SQS, S3 event notifications
-│   │   ├── processing/    # Lambda functions, Step Functions
+│   │   ├── processing/    # Lambda functions
 │   │   ├── storage/       # Aurora PostgreSQL, pgvector setup
 │   │   ├── retrieval/     # API Gateway, Lambda
 │   │   ├── security/      # Cognito, Secrets Manager, KMS, WAF, IAM
@@ -543,4 +535,3 @@ python diagram.py   # outputs to images/architecture.png
 - [pgvector HNSW indexing](https://github.com/pgvector/pgvector)
 - [AWS Bedrock Titan Embeddings v2](https://aws.amazon.com/bedrock/)
 - [RAGAS - RAG Evaluation Framework](https://docs.ragas.io/)
-- [Step Functions - Amazon States Language](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-amazon-states-language.html)

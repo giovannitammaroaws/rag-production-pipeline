@@ -10,7 +10,7 @@ from diagrams.aws.storage import S3
 from diagrams.aws.compute import Lambda
 from diagrams.aws.database import Aurora
 from diagrams.aws.ml import Bedrock
-from diagrams.aws.integration import SQS, StepFunctions
+from diagrams.aws.integration import SQS
 from diagrams.aws.network import APIGateway, CloudFront, NATGateway
 from diagrams.aws.security import Cognito, SecretsManager, KMS, WAF
 from diagrams.aws.management import Cloudwatch
@@ -47,7 +47,6 @@ with Diagram(
     with Cluster("AWS Managed - Pipeline"):
         doc_s3 = S3("S3\n(raw documents)")
         sqs = SQS("SQS Queue\n(+ DLQ)")
-        sf = StepFunctions("Step Functions\n(job state)")
 
     with Cluster("AWS Managed - AI"):
         titan = Bedrock("Titan Embeddings v2\n(1536 dims)")
@@ -70,7 +69,7 @@ with Diagram(
         with Cluster("Private Subnet"):
             presigned_fn = Lambda("Lambda\n(presigned URL)")
 
-            with Cluster("Prefect Tasks"):
+            with Cluster("Prefect Flow"):
                 chunking = Lambda("@task\nChunking")
                 embedding = Lambda("@task\nEmbedding")
                 indexing = Lambda("@task\nIndexing")
@@ -87,8 +86,7 @@ with Diagram(
     apigw >> presigned_fn
     presigned_fn >> doc_s3
     doc_s3 >> Edge(label="S3 Event") >> sqs
-    sqs >> sf
-    sf >> chunking
+    sqs >> chunking
     chunking >> embedding >> indexing
     indexing >> aurora
 
@@ -111,7 +109,6 @@ with Diagram(
     chunking >> secrets
 
     # ── OBSERVABILITY ──
-    sf >> cw
     retrieval >> cw
     embedding >> cw
     retrieval >> xray
