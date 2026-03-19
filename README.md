@@ -11,7 +11,7 @@ Two independent flows share the same Aurora pgvector database via Bedrock Knowle
 ![Architecture](images/architecture_v9.png)
 
 ```
-ONE API GATEWAY — two routes:
+ONE API GATEWAY - two routes:
   POST /upload-url  → Lambda (presigned URL, 15 lines)
   POST /query       → Lambda (retrieval, calls Bedrock RetrieveAndGenerate)
 
@@ -145,7 +145,7 @@ SHARED INFRASTRUCTURE
 ### Storage & Ingestion
 
 **Amazon S3**
-Stores raw documents (PDF, DOCX, TXT) uploaded by users. Presigned URL policy enforces `content-length-range` (max 50MB) and `content-type: application/pdf` — the Lambda never touches the file bytes, and users cannot bypass the size or type constraint.
+Stores raw documents (PDF, DOCX, TXT) uploaded by users. Presigned URL policy enforces `content-length-range` (max 50MB) and `content-type: application/pdf` - the Lambda never touches the file bytes, and users cannot bypass the size or type constraint.
 
 **S3 Event Notifications → SQS FIFO**
 This is our CDC (Change Data Capture) mechanism. S3 pushes a message to SQS the moment a file is uploaded. We use a FIFO queue with `MessageDeduplicationId = S3 ETag` so re-uploading the same file never triggers two ingestion jobs for the same content.
@@ -204,7 +204,7 @@ Hierarchical Navigable Small World - enables 10-50ms similarity search at 1M+ ve
 
 Three logical tables in a single DynamoDB deployment:
 
-**`documents` table** — registry of all uploaded files
+**`documents` table** - registry of all uploaded files
 ```json
 {
   "doc_id": "uuid-1234",
@@ -217,7 +217,7 @@ Three logical tables in a single DynamoDB deployment:
 }
 ```
 
-**`jobs` table** — ingestion job lifecycle tracking
+**`jobs` table** - ingestion job lifecycle tracking
 ```json
 {
   "job_id": "bedrock-job-xyz",
@@ -228,7 +228,7 @@ Three logical tables in a single DynamoDB deployment:
 }
 ```
 
-**`sessions` table** — conversation history per user (TTL = 24h)
+**`sessions` table** - conversation history per user (TTL = 24h)
 ```json
 {
   "session_id": "sess-abc",
@@ -248,13 +248,13 @@ Three logical tables in a single DynamoDB deployment:
 **Amazon API Gateway**
 Single gateway with two routes: `POST /upload-url` and `POST /query`. Handles SSL termination, rate limiting, and Cognito JWT authorization.
 
-**Lambda (presigned URL) — 15 lines**
+**Lambda (presigned URL) - 15 lines**
 Generates a signed S3 URL so the client uploads directly to S3. Writes the document entry to DynamoDB with `status: PENDING` before returning the URL.
 
-**Lambda (ingestion trigger) — ~20 lines**
+**Lambda (ingestion trigger) - ~20 lines**
 Triggered by SQS FIFO. Calls `bedrock.start_ingestion_job()`, writes `status: RUNNING` to DynamoDB, polls until complete, updates to `COMPLETE` or `FAILED`.
 
-**Lambda (retrieval) — ~20 lines**
+**Lambda (retrieval) - ~20 lines**
 Reads session history from DynamoDB, calls `bedrock.retrieve_and_generate()` with context, writes the new turn back to DynamoDB.
 
 **Amazon CloudFront + S3 (Frontend)**
@@ -265,7 +265,7 @@ Serves the React frontend as a static site. CloudFront acts as CDN - HTTPS by de
 ### Security
 
 **Amazon Cognito (invite-only)**
-Admin creates users via `admin_create_user` — no self-signup. Cognito sends a temporary password by email. On first login, user sets a permanent password and enrolls MFA (OTP via email). API Gateway validates the Cognito JWT on every request — unauthenticated calls are rejected before reaching Lambda.
+Admin creates users via `admin_create_user` - no self-signup. Cognito sends a temporary password by email. On first login, user sets a permanent password and enrolls MFA (OTP via email). API Gateway validates the Cognito JWT on every request - unauthenticated calls are rejected before reaching Lambda.
 
 ```hcl
 resource "aws_cognito_user_pool" "main" {
@@ -327,8 +327,8 @@ Distributed tracing: Lambda → Bedrock KB → Aurora. Pinpoints where latency c
 
 ### Infrastructure & CI/CD
 
-**Terraform — Remote Backend**
-State stored in S3 with DynamoDB locking — no local state file, safe for team collaboration:
+**Terraform - Remote Backend**
+State stored in S3 with DynamoDB locking - no local state file, safe for team collaboration:
 
 ```hcl
 terraform {
@@ -354,9 +354,9 @@ terraform {
 
 ## Roadmap
 
-The project is structured in three phases: ship a working, secure pipeline first — then harden it for real traffic — then improve retrieval quality with ML techniques.
+The project is structured in three phases: ship a working, secure pipeline first - then harden it for real traffic - then improve retrieval quality with ML techniques.
 
-### Phase 1 — Core (this repo)
+### Phase 1 - Core (this repo)
 
 Foundational: the pipeline works end-to-end, is secure, and is observable.
 
@@ -375,7 +375,7 @@ Foundational: the pipeline works end-to-end, is secure, and is observable.
 
 ---
 
-### Phase 2 — Production Hardening
+### Phase 2 - Production Hardening
 
 Security and reliability improvements before handling real multi-tenant traffic.
 
@@ -383,37 +383,37 @@ Security and reliability improvements before handling real multi-tenant traffic.
 Bedrock KB returns top-K chunks sorted by cosine similarity. The problem: a highly relevant chunk can sit at rank 6 and never make it into the LLM context window. Re-ranking re-scores the top-K candidates using a cross-encoder model (Cohere Rerank) which understands query-chunk semantic relationships better than raw vector similarity. Result: better recall without increasing chunk count.
 
 **2. Document ACL + metadata filtering**
-Today every authenticated user can retrieve content from every document in the knowledge base. A proper multi-tenant system must isolate documents per user or per tenant. Bedrock KB supports metadata filters on retrieval — we add `user_id` as chunk metadata at ingestion time and filter by it on every retrieve call. No cross-tenant data leakage.
+Today every authenticated user can retrieve content from every document in the knowledge base. A proper multi-tenant system must isolate documents per user or per tenant. Bedrock KB supports metadata filters on retrieval - we add `user_id` as chunk metadata at ingestion time and filter by it on every retrieve call. No cross-tenant data leakage.
 
 **3. VPC Endpoints for Bedrock (replace NAT Gateway)**
-The NAT Gateway is both a single point of failure and a $32/month fixed cost. If it goes down, both ingestion and retrieval stop working. VPC Interface Endpoints (PrivateLink) for Bedrock and Secrets Manager eliminate the public internet path entirely — traffic stays inside the AWS network, there is no single gateway to fail, and at higher query volumes the per-GB cost is lower than NAT data processing fees. Also required for HIPAA/SOC2 compliance.
+The NAT Gateway is both a single point of failure and a $32/month fixed cost. If it goes down, both ingestion and retrieval stop working. VPC Interface Endpoints (PrivateLink) for Bedrock and Secrets Manager eliminate the public internet path entirely - traffic stays inside the AWS network, there is no single gateway to fail, and at higher query volumes the per-GB cost is lower than NAT data processing fees. Also required for HIPAA/SOC2 compliance.
 
 **4. Rate limiting per user (API Gateway Usage Plans)**
 A single malicious or buggy client can spam `/query` and generate unbounded Bedrock API costs. API Gateway Usage Plans let us assign a quota per API key (e.g. 1,000 queries/day per user) and throttle at 100 requests/minute per key. Protects both cost and availability.
 
 **5. Document versioning (delete old chunks before re-index)**
-When a user re-uploads a modified version of a document, Bedrock KB creates new chunks but does not delete the old ones. Aurora ends up with two versions of the same document — the LLM receives contradictory context and produces inconsistent answers. Fix: the ingestion trigger Lambda deletes all existing chunks for the `doc_id` before calling `start_ingestion_job`.
+When a user re-uploads a modified version of a document, Bedrock KB creates new chunks but does not delete the old ones. Aurora ends up with two versions of the same document - the LLM receives contradictory context and produces inconsistent answers. Fix: the ingestion trigger Lambda deletes all existing chunks for the `doc_id` before calling `start_ingestion_job`.
 
 **6. Virus scanning (ClamAV Lambda Layer)**
-Users upload files directly to S3 via presigned URL — the content is never inspected by our code. A malicious PDF could contain embedded scripts or exploit payloads that later get processed by Bedrock. A ClamAV Lambda Layer triggered on S3 `ObjectCreated` events scans the file before it reaches the SQS ingestion queue. Infected files are quarantined to a separate S3 prefix and the document entry in DynamoDB is marked `QUARANTINED`.
+Users upload files directly to S3 via presigned URL - the content is never inspected by our code. A malicious PDF could contain embedded scripts or exploit payloads that later get processed by Bedrock. A ClamAV Lambda Layer triggered on S3 `ObjectCreated` events scans the file before it reaches the SQS ingestion queue. Infected files are quarantined to a separate S3 prefix and the document entry in DynamoDB is marked `QUARANTINED`.
 
 ---
 
-### Phase 3 — Advanced ML
+### Phase 3 - Advanced ML
 
-Retrieval quality improvements. Each change is gated behind RAGAS benchmarks — we only ship what measurably improves Faithfulness, Context Recall, or Answer Relevancy.
+Retrieval quality improvements. Each change is gated behind RAGAS benchmarks - we only ship what measurably improves Faithfulness, Context Recall, or Answer Relevancy.
 
-**1. HyDE — Hypothetical Document Embeddings**
+**1. HyDE - Hypothetical Document Embeddings**
 Short or ambiguous queries (e.g. "revenue?") produce poor embeddings because the query vector is far from the document chunk vectors in the embedding space. HyDE fixes this: ask Claude to generate a hypothetical answer to the question first, then embed that hypothetical answer instead of the raw query. The hypothetical answer lives in the same semantic space as real document chunks, improving retrieval recall significantly on short queries.
 
 **2. Semantic caching (ElastiCache Redis)**
-Every `/query` call hits Bedrock — embedding generation + HNSW search + LLM inference — even for identical or near-identical questions. Semantic caching stores query embeddings and answers in Redis. On each new query, we compute the embedding and search Redis for a cached entry with cosine similarity > 0.95. If found, return the cached answer instantly at zero Bedrock cost. At moderate query volumes (1,000+ queries/day) this can cut Bedrock costs by 40-60%.
+Every `/query` call hits Bedrock - embedding generation + HNSW search + LLM inference - even for identical or near-identical questions. Semantic caching stores query embeddings and answers in Redis. On each new query, we compute the embedding and search Redis for a cached entry with cosine similarity > 0.95. If found, return the cached answer instantly at zero Bedrock cost. At moderate query volumes (1,000+ queries/day) this can cut Bedrock costs by 40-60%.
 
 **3. Model routing (Haiku → Sonnet)**
 Claude 3 Haiku handles simple factual questions well but struggles with complex multi-step reasoning or synthesis across many chunks. A lightweight classifier (based on query length, question word count, and keyword heuristics) routes simple questions to Haiku ($0.00025/1K input) and complex ones to Claude 3 Sonnet ($0.003/1K input). Measured impact before/after via RAGAS Answer Relevancy.
 
 **4. RAGAS automated evaluation pipeline**
-All Phase 3 changes must be validated against a fixed golden dataset before merging. The CI/CD pipeline runs RAGAS evaluation on staging after every deploy — Faithfulness, Answer Relevancy, Context Precision, Context Recall — and blocks promotion to prod if any metric drops more than 2% from baseline.
+All Phase 3 changes must be validated against a fixed golden dataset before merging. The CI/CD pipeline runs RAGAS evaluation on staging after every deploy - Faithfulness, Answer Relevancy, Context Precision, Context Recall - and blocks promotion to prod if any metric drops more than 2% from baseline.
 
 ---
 
