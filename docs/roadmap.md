@@ -21,6 +21,9 @@ Foundational: pipeline works end-to-end, is secure, and observable.
 | 9 | CloudWatch Alarms (error rate, p99 latency, DLQ depth, Aurora CPU) | In progress |
 | 10 | WAF Managed Rules (CommonRuleSet + KnownBadInputs) | In progress |
 | 11 | Locust load tests (`tests/load/`) - p95 latency and error rate under concurrent traffic | In progress |
+| 12 | Right to be forgotten - `DELETE /documents/{doc_id}` cascades across S3, Aurora chunks, DynamoDB jobs and sessions (GDPR art. 17) | Planned |
+| 13 | Audit logging - DynamoDB `audit_events` table tracking who uploaded what and who queried what, when | Planned |
+| 14 | RAGAS golden dataset - `evaluation/golden_dataset.json` with 20-30 question/ground-truth pairs required to run quality evaluation | Planned |
 
 ---
 
