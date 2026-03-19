@@ -27,7 +27,7 @@ graph_attr = {
 
 with Diagram(
     "RAG Production Pipeline - AWS Architecture",
-    filename="images/architecture_v3",
+    filename="images/architecture_v4",
     outformat="png",
     graph_attr=graph_attr,
     show=False,
@@ -94,8 +94,11 @@ with Diagram(
     apigw >> retrieval
     retrieval >> aurora
 
-    # ── Lambda → Bedrock via NAT GW ──
+    # ── Lambda → AWS Services via NAT GW ──
+    presigned_fn >> nat
+    chunking >> nat
     embedding >> nat
+    indexing >> nat
     retrieval >> nat
     nat >> titan
     nat >> claude
